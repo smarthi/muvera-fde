@@ -1,4 +1,4 @@
-# muvera-fde
+# Implementation of MUVERA: Retrieval via Fixed Dimension Encodings
 
 **Fixed Dimensional Encodings for multi-vector retrieval.**
 
