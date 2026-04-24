@@ -9,14 +9,12 @@ cache so repeated encode calls pay no RNG or allocation overhead.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 
-from muvera_fde.config import FDEConfig, ProjectionType
-from muvera_fde.core import generate_query_fde, generate_document_fde
 from muvera_fde._internal.params import RepParams, build_rep_params
-from muvera_fde._internal.validation import validate_config, checked_intermediate_fde_length
+from muvera_fde._internal.validation import checked_intermediate_fde_length, validate_config
+from muvera_fde.config import FDEConfig, ProjectionType
+from muvera_fde.core import generate_document_fde, generate_query_fde
 
 
 class MUVERAEncoder:
@@ -89,9 +87,9 @@ class MUVERAEncoder:
         num_repetitions: int = 1,
         seed: int = 1,
         projection_type: ProjectionType = ProjectionType.DEFAULT_IDENTITY,
-        projection_dimension: Optional[int] = None,
+        projection_dimension: int | None = None,
         fill_empty_partitions: bool = False,
-        final_projection_dimension: Optional[int] = None,
+        final_projection_dimension: int | None = None,
     ) -> None:
         self._base_config: dict = dict(
             dimension=dimension,

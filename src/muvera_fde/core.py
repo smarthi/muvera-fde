@@ -10,30 +10,28 @@ This module is part of the public API.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 
-from muvera_fde.config import FDEConfig, ProjectionType
 from muvera_fde._internal.params import RepParams, build_rep_params
-from muvera_fde._internal.sketch import simhash_partition_indices, count_sketch
+from muvera_fde._internal.sketch import count_sketch, simhash_partition_indices
 from muvera_fde._internal.validation import (
-    validate_config,
-    prepare_embeddings,
     checked_intermediate_fde_length,
+    prepare_embeddings,
+    validate_config,
 )
-
+from muvera_fde.config import FDEConfig, ProjectionType
 
 # ---------------------------------------------------------------------------
 # Shared projection + partition helper
 # ---------------------------------------------------------------------------
+
 
 def _project_and_partition(
     embedding_matrix: np.ndarray,
     rep_params: RepParams,
     use_identity: bool,
     projection_dim: int,
-) -> tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Apply optional Count Sketch and SimHash partitioning for one repetition.
 
     Returns
@@ -47,13 +45,12 @@ def _project_and_partition(
     if use_identity:
         projected = embedding_matrix
     else:
+        assert rep_params.cs_indices is not None and rep_params.cs_signs is not None
         projected = np.zeros((num_points, projection_dim), dtype=np.float32)
         np.add.at(projected.T, rep_params.cs_indices, (embedding_matrix * rep_params.cs_signs).T)
 
     sketch_matrix = (
-        projected @ rep_params.simhash_mat
-        if rep_params.simhash_mat is not None
-        else None
+        projected @ rep_params.simhash_mat if rep_params.simhash_mat is not None else None
     )
     partition_indices = (
         simhash_partition_indices(sketch_matrix)
@@ -66,6 +63,7 @@ def _project_and_partition(
 # ---------------------------------------------------------------------------
 # Empty-partition fill (document side only)
 # ---------------------------------------------------------------------------
+
 
 def _fill_empty_partitions(
     rep_slice: np.ndarray,
@@ -107,7 +105,7 @@ def _normalize_and_fill_rep(
     rep_slice: np.ndarray,
     partition_indices: np.ndarray,
     projected: np.ndarray,
-    sketch_matrix: Optional[np.ndarray],
+    sketch_matrix: np.ndarray | None,
     config: FDEConfig,
     num_partitions: int,
 ) -> None:
@@ -137,10 +135,11 @@ def _maybe_count_sketch(out: np.ndarray, config: FDEConfig) -> np.ndarray:
 # Public generation functions
 # ---------------------------------------------------------------------------
 
+
 def generate_query_fde(
     point_cloud: np.ndarray,
     config: FDEConfig,
-    rep_params_list: Optional[list[RepParams]] = None,
+    rep_params_list: list[RepParams] | None = None,
 ) -> np.ndarray:
     """Generate a query-side Fixed Dimensional Encoding (SUM aggregation).
 
@@ -189,15 +188,18 @@ def generate_query_fde(
             rep_params_list[rep]
             if rep_params_list is not None
             else build_rep_params(
-                config.seed + rep, config.dimension, projection_dim,
-                config.num_simhash_projections, use_identity,
+                config.seed + rep,
+                config.dimension,
+                projection_dim,
+                config.num_simhash_projections,
+                use_identity,
             )
         )
         projected, partition_indices, _ = _project_and_partition(
             embedding_matrix, params, use_identity, projection_dim
         )
         rep_offset = rep * num_partitions * projection_dim
-        rep_slice = out[rep_offset: rep_offset + num_partitions * projection_dim].reshape(
+        rep_slice = out[rep_offset : rep_offset + num_partitions * projection_dim].reshape(
             num_partitions, projection_dim
         )
         np.add.at(rep_slice, partition_indices, projected)
@@ -208,7 +210,7 @@ def generate_query_fde(
 def generate_document_fde(
     point_cloud: np.ndarray,
     config: FDEConfig,
-    rep_params_list: Optional[list[RepParams]] = None,
+    rep_params_list: list[RepParams] | None = None,
 ) -> np.ndarray:
     """Generate a document-side Fixed Dimensional Encoding (AVERAGE aggregation).
 
@@ -250,15 +252,18 @@ def generate_document_fde(
             rep_params_list[rep]
             if rep_params_list is not None
             else build_rep_params(
-                config.seed + rep, config.dimension, projection_dim,
-                config.num_simhash_projections, use_identity,
+                config.seed + rep,
+                config.dimension,
+                projection_dim,
+                config.num_simhash_projections,
+                use_identity,
             )
         )
         projected, partition_indices, sketch_matrix = _project_and_partition(
             embedding_matrix, params, use_identity, projection_dim
         )
         rep_offset = rep * num_partitions * projection_dim
-        rep_slice = out[rep_offset: rep_offset + num_partitions * projection_dim].reshape(
+        rep_slice = out[rep_offset : rep_offset + num_partitions * projection_dim].reshape(
             num_partitions, projection_dim
         )
         np.add.at(rep_slice, partition_indices, projected)
