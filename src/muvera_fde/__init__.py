@@ -18,7 +18,7 @@ Quick start
 >>> score = float(q_fde @ d_fde)   # approximate Chamfer Similarity
 """
 
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
 
 try:
     __version__: str = version("muvera-fde")
@@ -26,7 +26,7 @@ except PackageNotFoundError:  # editable / source installs before build
     __version__ = "0.0.0.dev0"
 
 from muvera_fde.config import FDEConfig, ProjectionType
-from muvera_fde.core import generate_query_fde, generate_document_fde
+from muvera_fde.core import generate_document_fde, generate_query_fde
 from muvera_fde.encoder import MUVERAEncoder
 
 __all__ = [

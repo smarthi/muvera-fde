@@ -6,8 +6,6 @@ This module is not part of the public API.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
@@ -35,9 +33,9 @@ class RepParams(BaseModel):
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    cs_indices: Optional[np.ndarray]
-    cs_signs: Optional[np.ndarray]
-    simhash_mat: Optional[np.ndarray]
+    cs_indices: np.ndarray | None
+    cs_signs: np.ndarray | None
+    simhash_mat: np.ndarray | None
 
 
 def build_rep_params(

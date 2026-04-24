@@ -24,6 +24,7 @@ MAX_SIMHASH_PROJECTIONS_WITH_FILL: int = 20
 # SimHash utilities
 # ---------------------------------------------------------------------------
 
+
 def simhash_matrix(seed: int, dimension: int, num_projections: int) -> np.ndarray:
     """Return a random Gaussian projection matrix for SimHash partitioning.
 
@@ -43,9 +44,7 @@ def simhash_matrix(seed: int, dimension: int, num_projections: int) -> np.ndarra
         for embedding *x*.
     """
     return (
-        np.random.default_rng(seed)
-        .standard_normal((dimension, num_projections))
-        .astype(np.float32)
+        np.random.default_rng(seed).standard_normal((dimension, num_projections)).astype(np.float32)
     )
 
 
@@ -75,6 +74,7 @@ def simhash_partition_indices(sketch_matrix: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Count Sketch
 # ---------------------------------------------------------------------------
+
 
 def _splitmix64(values: np.ndarray) -> np.ndarray:
     """Return a deterministic 64-bit mixed hash for each uint64 input value.

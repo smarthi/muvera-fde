@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from muvera_fde.config import FDEConfig, ProjectionType
 from muvera_fde._internal.sketch import MAX_SIMHASH_PROJECTIONS, MAX_SIMHASH_PROJECTIONS_WITH_FILL
+from muvera_fde.config import FDEConfig, ProjectionType
 
 _MAX_INTERMEDIATE_FDE_BYTES: int = 1 << 30  # 1 GiB practical upper bound
 
@@ -17,6 +17,7 @@ _MAX_INTERMEDIATE_FDE_BYTES: int = 1 << 30  # 1 GiB practical upper bound
 # ---------------------------------------------------------------------------
 # Config validation
 # ---------------------------------------------------------------------------
+
 
 def _check_positive(value: int, name: str) -> None:
     if value <= 0:
@@ -43,8 +44,7 @@ def _check_projection_dimension(config: FDEConfig) -> None:
         return
     if config.projection_dimension is None or config.projection_dimension <= 0:
         raise ValueError(
-            "A positive projection_dimension must be set when using a "
-            "non-identity projection_type."
+            "A positive projection_dimension must be set when using a non-identity projection_type."
         )
 
 
@@ -67,6 +67,7 @@ def validate_config(config: FDEConfig) -> None:
 # ---------------------------------------------------------------------------
 # Input preparation
 # ---------------------------------------------------------------------------
+
 
 def prepare_embeddings(point_cloud: np.ndarray, config: FDEConfig) -> np.ndarray:
     """Coerce a point cloud to a float32 matrix of shape (num_points, dimension).

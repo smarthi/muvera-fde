@@ -7,7 +7,6 @@ These are the only types callers need to import to configure an encoder.
 from __future__ import annotations
 
 import enum
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -86,6 +85,6 @@ class FDEConfig(BaseModel):
     num_simhash_projections: int = 4
     seed: int = 1
     projection_type: ProjectionType = ProjectionType.DEFAULT_IDENTITY
-    projection_dimension: Optional[int] = None
+    projection_dimension: int | None = None
     fill_empty_partitions: bool = False
-    final_projection_dimension: Optional[int] = None
+    final_projection_dimension: int | None = None
