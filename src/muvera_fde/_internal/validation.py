@@ -40,11 +40,32 @@ def _check_simhash_projections(config: FDEConfig) -> None:
 
 
 def _check_projection_dimension(config: FDEConfig) -> None:
-    if config.projection_type == ProjectionType.DEFAULT_IDENTITY:
+    if config.projection_type == ProjectionType.AMS_SKETCH:
+        if config.projection_dimension is None or config.projection_dimension <= 0:
+            raise ValueError("A positive projection_dimension must be set when using AMS_SKETCH.")
+
+
+def _check_simhash_rank(config: FDEConfig) -> None:
+    """Validate simhash_rank when LOW_RANK_GAUSSIAN is selected.
+
+    Rules
+    -----
+    - simhash_rank must be positive.
+    - When num_simhash_projections > 0, simhash_rank must be strictly less than
+      num_simhash_projections; a rank equal to or exceeding k would not reduce
+      computation vs. the full (d x k) matrix in the decomposed matmul path.
+    """
+    if config.projection_type != ProjectionType.LOW_RANK_GAUSSIAN:
         return
-    if config.projection_dimension is None or config.projection_dimension <= 0:
+    if config.simhash_rank <= 0:
         raise ValueError(
-            "A positive projection_dimension must be set when using a non-identity projection_type."
+            f"simhash_rank must be positive when using LOW_RANK_GAUSSIAN, got {config.simhash_rank}"
+        )
+    if config.num_simhash_projections > 0 and config.simhash_rank >= config.num_simhash_projections:
+        raise ValueError(
+            f"simhash_rank ({config.simhash_rank}) must be strictly less than "
+            f"num_simhash_projections ({config.num_simhash_projections}) "
+            "to form a proper low-rank factorisation."
         )
 
 
@@ -62,6 +83,7 @@ def validate_config(config: FDEConfig) -> None:
         _check_positive(config.final_projection_dimension, "final_projection_dimension")
     _check_simhash_projections(config)
     _check_projection_dimension(config)
+    _check_simhash_rank(config)
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +134,7 @@ def checked_intermediate_fde_length(config: FDEConfig, projection_dim: int) -> i
     if required_bytes > _MAX_INTERMEDIATE_FDE_BYTES:
         raise ValueError(
             f"Configuration would allocate an intermediate FDE of {required_bytes} bytes "
-            f"({config.num_repetitions} repetitions × {num_partitions} partitions × "
+            f"({config.num_repetitions} repetitions x {num_partitions} partitions x "
             f"{projection_dim} dimensions), which exceeds the "
             f"{_MAX_INTERMEDIATE_FDE_BYTES}-byte limit. Reduce num_simhash_projections, "
             "num_repetitions, or projection_dimension."

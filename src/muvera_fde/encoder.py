@@ -14,7 +14,13 @@ import numpy as np
 from muvera_fde._internal.params import RepParams, build_rep_params
 from muvera_fde._internal.validation import checked_intermediate_fde_length, validate_config
 from muvera_fde.config import FDEConfig, ProjectionType
-from muvera_fde.core import generate_document_fde, generate_query_fde
+from muvera_fde.core import (
+    _projection_dim_for,
+    _use_identity,
+    _use_low_rank_simhash,
+    generate_document_fde,
+    generate_query_fde,
+)
 
 
 class MUVERAEncoder:
@@ -33,14 +39,22 @@ class MUVERAEncoder:
     num_repetitions:
         Independent repetitions for better approximation quality.
     seed:
-        Shared RNG seed — must be identical across query and document encoders.
+        Shared RNG seed -- must be identical across query and document encoders.
     projection_type:
-        :attr:`~muvera_fde.config.ProjectionType.DEFAULT_IDENTITY` (no
-        projection) or :attr:`~muvera_fde.config.ProjectionType.AMS_SKETCH`
-        (Count Sketch sparse random projection).
+        :attr:`~muvera_fde.config.ProjectionType.DEFAULT_IDENTITY` (no projection),
+        :attr:`~muvera_fde.config.ProjectionType.AMS_SKETCH` (Count Sketch on token
+        embeddings), or
+        :attr:`~muvera_fde.config.ProjectionType.LOW_RANK_GAUSSIAN` (low-rank
+        factored SimHash matrix).
     projection_dimension:
         Target dimension after Count Sketch projection.  Required when
         *projection_type* is ``AMS_SKETCH``; ignored otherwise.
+    simhash_rank:
+        Rank *r* for ``LOW_RANK_GAUSSIAN`` SimHash factorisation.
+        Must satisfy ``1 <= simhash_rank < num_simhash_projections``.
+        Higher rank -> better approximation at higher cost.
+        r=4 is a practical sweet spot for ColQwen2 (128-dim, k>=8).
+        Ignored when *projection_type* is not ``LOW_RANK_GAUSSIAN``.
     fill_empty_partitions:
         Document side only.  When ``True``, empty partition slots are filled
         with the projection of the nearest token by SimHash Hamming distance.
@@ -57,17 +71,28 @@ class MUVERAEncoder:
 
         enc = MUVERAEncoder(dimension=128, num_simhash_projections=4, num_repetitions=2)
 
-        # Simulate ColQwen2-style multi-vector embeddings
-        query_tokens   = np.random.randn(32,  128).astype(np.float32)
-        doc_tokens     = np.random.randn(512, 128).astype(np.float32)
+        query_tokens = np.random.randn(32,  128).astype(np.float32)
+        doc_tokens   = np.random.randn(512, 128).astype(np.float32)
 
-        q_fde = enc.encode_query(query_tokens)     # shape: (2048,)
-        d_fde = enc.encode_document(doc_tokens)    # shape: (2048,)
+        q_fde = enc.encode_query(query_tokens)   # shape: (2 * 16 * 128,) = (4096,)
+        d_fde = enc.encode_document(doc_tokens)
+        score = float(q_fde @ d_fde)             # approx Chamfer Similarity
 
-        # Approximate Chamfer Similarity via standard dot product
-        score = float(q_fde @ d_fde)
+    With low-rank SimHash (EGGROLL-style, faster partition assignment)::
 
-    With Count Sketch compression::
+        from muvera_fde import ProjectionType
+
+        enc = MUVERAEncoder(
+            dimension=128,
+            num_simhash_projections=8,   # 2^8 = 256 partitions
+            num_repetitions=4,
+            projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+            simhash_rank=4,              # r=4 -> ~25% variance vs full-rank
+        )
+        # SimHash cost: O(N*128*4 + N*4*8) = O(544N) vs O(1024N) full-rank
+        # Convergence to full-rank: O(r^-1) = O(0.25) (EGGROLL Theorem 4)
+
+    With Count Sketch token compression::
 
         enc = MUVERAEncoder(
             dimension=128,
@@ -88,6 +113,7 @@ class MUVERAEncoder:
         seed: int = 1,
         projection_type: ProjectionType = ProjectionType.DEFAULT_IDENTITY,
         projection_dimension: int | None = None,
+        simhash_rank: int = 1,
         fill_empty_partitions: bool = False,
         final_projection_dimension: int | None = None,
     ) -> None:
@@ -98,24 +124,31 @@ class MUVERAEncoder:
             seed=seed,
             projection_type=projection_type,
             projection_dimension=projection_dimension,
+            simhash_rank=simhash_rank,
             final_projection_dimension=final_projection_dimension,
         )
         self.fill_empty_partitions = fill_empty_partitions
 
-        # Validate eagerly — fde_dimension and encode_* are always safe after __init__.
+        # Validate eagerly -- fde_dimension and encode_* are always safe after __init__.
         config = FDEConfig(**self._base_config, fill_empty_partitions=fill_empty_partitions)
         validate_config(config)
 
-        _use_identity = projection_type == ProjectionType.DEFAULT_IDENTITY
-        _proj_dim = dimension if _use_identity else projection_dimension
-        assert _proj_dim is not None, "projection_dimension required for non-identity projection"
+        _proj_dim = _projection_dim_for(config)
+        _use_id = _use_identity(config)
+        _use_lr = _use_low_rank_simhash(config)
 
         checked_intermediate_fde_length(config, _proj_dim)
 
         # Precompute per-repetition parameters once.
         self._rep_params: list[RepParams] = [
             build_rep_params(
-                seed + rep, dimension, _proj_dim, num_simhash_projections, _use_identity
+                seed + rep,
+                dimension,
+                _proj_dim,
+                num_simhash_projections,
+                _use_id,
+                use_low_rank_simhash=_use_lr,
+                simhash_rank=simhash_rank,
             )
             for rep in range(num_repetitions)
         ]
@@ -130,17 +163,14 @@ class MUVERAEncoder:
 
         Returns ``final_projection_dimension`` when Count-Sketch compression is
         configured; otherwise returns
-        ``num_repetitions × 2**num_simhash_projections × projection_dim``.
+        ``num_repetitions x 2**num_simhash_projections x projection_dim``
+        where projection_dim is ``dimension`` for DEFAULT_IDENTITY / LOW_RANK_GAUSSIAN,
+        or ``projection_dimension`` for AMS_SKETCH.
         """
         if self._base_config["final_projection_dimension"] is not None:
             return self._base_config["final_projection_dimension"]
-        use_identity = self._base_config["projection_type"] == ProjectionType.DEFAULT_IDENTITY
-        proj_dim = (
-            self._base_config["dimension"]
-            if use_identity
-            else self._base_config["projection_dimension"]
-        )
-        assert proj_dim is not None
+        config = FDEConfig(**self._base_config, fill_empty_partitions=self.fill_empty_partitions)
+        proj_dim = _projection_dim_for(config)
         num_partitions = 1 << self._base_config["num_simhash_projections"]
         return self._base_config["num_repetitions"] * num_partitions * proj_dim
 
@@ -220,12 +250,19 @@ class MUVERAEncoder:
 
     def __repr__(self) -> str:
         cfg = self._base_config
+        pt = cfg["projection_type"]
+        rank_str = (
+            f", simhash_rank={cfg['simhash_rank']}"
+            if pt == ProjectionType.LOW_RANK_GAUSSIAN
+            else ""
+        )
         return (
             f"MUVERAEncoder("
             f"dimension={cfg['dimension']}, "
             f"num_simhash_projections={cfg['num_simhash_projections']}, "
             f"num_repetitions={cfg['num_repetitions']}, "
-            f"projection_type={cfg['projection_type'].name}, "
+            f"projection_type={pt.name}"
+            f"{rank_str}, "
             f"fde_dimension={self.fde_dimension}"
             f")"
         )

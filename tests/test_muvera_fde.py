@@ -1,4 +1,20 @@
-"""Tests for muvera-fde."""
+"""
+Tests for muvera-fde.
+
+Coverage targets:
+  - FDEConfig validation (all error branches, including LOW_RANK_GAUSSIAN)
+  - MUVERAEncoder construction and repr
+  - Shape/dtype contracts for encode_query / encode_document / batch variants
+  - Determinism (same seed -> same output)
+  - Cross-encoder consistency (mismatched seeds -> different output)
+  - Dot-product approximation guarantee (unbiasedness check, empirical)
+  - fill_empty_partitions on the document side
+  - Count Sketch final compression
+  - flat 1-D input acceptance
+  - Empty point cloud handling
+  - generate_query_fde / generate_document_fde low-level API
+  - LOW_RANK_GAUSSIAN SimHash: shape, determinism, convergence, validation
+"""
 
 from __future__ import annotations
 
@@ -13,6 +29,10 @@ from muvera_fde import (
     generate_query_fde,
 )
 from muvera_fde._internal.validation import validate_config
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 DIM = 32
 
@@ -35,6 +55,11 @@ def query_cloud(rng: np.random.Generator) -> np.ndarray:
 @pytest.fixture
 def doc_cloud(rng: np.random.Generator) -> np.ndarray:
     return rng.standard_normal((80, DIM)).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Config validation
+# ---------------------------------------------------------------------------
 
 
 class TestFDEConfigValidation:
@@ -75,6 +100,11 @@ class TestFDEConfigValidation:
         cloud = np.ones((4, 128), dtype=np.float32)
         with pytest.raises(ValueError, match="fill_empty_partitions"):
             generate_query_fde(cloud, config)
+
+
+# ---------------------------------------------------------------------------
+# Output shape and dtype
+# ---------------------------------------------------------------------------
 
 
 class TestOutputShape:
@@ -119,6 +149,11 @@ class TestOutputShape:
         assert enc.fde_dimension == 64
 
 
+# ---------------------------------------------------------------------------
+# Flat 1-D input
+# ---------------------------------------------------------------------------
+
+
 class TestFlatInput:
     def test_flat_query_input(self, default_enc: MUVERAEncoder, query_cloud: np.ndarray) -> None:
         out_2d = default_enc.encode_query(query_cloud)
@@ -134,6 +169,11 @@ class TestFlatInput:
         bad = np.ones(DIM + 1, dtype=np.float32)
         with pytest.raises(ValueError, match="not divisible"):
             default_enc.encode_query(bad)
+
+
+# ---------------------------------------------------------------------------
+# Determinism
+# ---------------------------------------------------------------------------
 
 
 class TestDeterminism:
@@ -158,6 +198,11 @@ class TestDeterminism:
         )
 
 
+# ---------------------------------------------------------------------------
+# Dot-product approximation (empirical unbiasedness)
+# ---------------------------------------------------------------------------
+
+
 class TestDotProductApproximation:
     def test_fde_dot_positive_for_similar_clouds(self, rng: np.random.Generator) -> None:
         enc = MUVERAEncoder(dimension=DIM, num_simhash_projections=4, num_repetitions=4, seed=0)
@@ -175,6 +220,11 @@ class TestDotProductApproximation:
         assert float(q_fde @ enc.encode_document(similar_doc)) > float(
             q_fde @ enc.encode_document(random_doc)
         )
+
+
+# ---------------------------------------------------------------------------
+# fill_empty_partitions
+# ---------------------------------------------------------------------------
 
 
 class TestFillEmptyPartitions:
@@ -205,6 +255,11 @@ class TestFillEmptyPartitions:
         assert (norms == 0).sum() > 0
 
 
+# ---------------------------------------------------------------------------
+# Count Sketch projection (AMS_SKETCH)
+# ---------------------------------------------------------------------------
+
+
 class TestCountSketchProjection:
     def test_ams_sketch_output_shape(self, rng: np.random.Generator) -> None:
         enc = MUVERAEncoder(
@@ -223,6 +278,183 @@ class TestCountSketchProjection:
         cloud = rng.standard_normal((50, DIM)).astype(np.float32)
         assert enc.encode_query(cloud).shape == (64,)
         assert enc.encode_document(cloud).shape == (64,)
+
+
+# ---------------------------------------------------------------------------
+# LOW_RANK_GAUSSIAN SimHash
+# ---------------------------------------------------------------------------
+
+
+class TestLowRankGaussianSimHash:
+    """Tests for the EGGROLL-inspired low-rank SimHash factorisation."""
+
+    def _lr_enc(self, rank: int = 3, k: int = 4, reps: int = 2) -> MUVERAEncoder:
+        return MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=k,
+            num_repetitions=reps,
+            projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+            simhash_rank=rank,
+            seed=99,
+        )
+
+    def test_output_shape(self, rng: np.random.Generator) -> None:
+        enc = self._lr_enc()
+        cloud = rng.standard_normal((50, DIM)).astype(np.float32)
+        # fde_dimension = reps x 2^k x dimension (same formula as DEFAULT_IDENTITY)
+        expected = 2 * (1 << 4) * DIM
+        assert enc.fde_dimension == expected
+        assert enc.encode_query(cloud).shape == (expected,)
+        assert enc.encode_document(cloud).shape == (expected,)
+
+    def test_dtype(self, rng: np.random.Generator) -> None:
+        enc = self._lr_enc()
+        cloud = rng.standard_normal((30, DIM)).astype(np.float32)
+        assert enc.encode_query(cloud).dtype == np.float32
+        assert enc.encode_document(cloud).dtype == np.float32
+
+    def test_deterministic(self, rng: np.random.Generator) -> None:
+        enc = self._lr_enc()
+        cloud = rng.standard_normal((30, DIM)).astype(np.float32)
+        np.testing.assert_array_equal(enc.encode_query(cloud), enc.encode_query(cloud))
+        np.testing.assert_array_equal(enc.encode_document(cloud), enc.encode_document(cloud))
+
+    def test_different_ranks_give_different_fdes(self, rng: np.random.Generator) -> None:
+        cloud = rng.standard_normal((40, DIM)).astype(np.float32)
+        enc1 = self._lr_enc(rank=1)
+        enc2 = self._lr_enc(rank=3)
+        # Different random factors A, B -> different FDE vectors
+        assert not np.array_equal(enc1.encode_query(cloud), enc2.encode_query(cloud))
+
+    def test_different_seeds_give_different_fdes(self, rng: np.random.Generator) -> None:
+        cloud = rng.standard_normal((40, DIM)).astype(np.float32)
+        enc1 = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+            simhash_rank=3,
+            seed=1,
+        )
+        enc2 = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+            simhash_rank=3,
+            seed=2,
+        )
+        assert not np.array_equal(enc1.encode_query(cloud), enc2.encode_query(cloud))
+
+    def test_invalid_rank_zero_raises(self) -> None:
+        with pytest.raises(ValueError, match="simhash_rank must be positive"):
+            MUVERAEncoder(
+                dimension=DIM,
+                num_simhash_projections=4,
+                projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+                simhash_rank=0,
+            )
+
+    def test_invalid_rank_gte_k_raises(self) -> None:
+        # rank must be < num_simhash_projections
+        with pytest.raises(ValueError, match="strictly less than"):
+            MUVERAEncoder(
+                dimension=DIM,
+                num_simhash_projections=4,
+                projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+                simhash_rank=4,  # equal to k -- invalid
+            )
+
+    def test_lr_approximates_chamfer_similarity(self, rng: np.random.Generator) -> None:
+        """LR SimHash should approximate Chamfer Similarity -- similar > random.
+
+        EGGROLL Theorem 4 proves convergence of the sign-pattern distribution to
+        the full-rank Gaussian at O(r^-1).  The practical consequence is that the
+        FDE dot product should still rank similar docs above random docs.  This is
+        tested independently of the full-rank encoder since the convergence is
+        distributional (over many draws of A, B, W), not sample-wise between two
+        different random instances.
+        """
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=5,
+            num_repetitions=6,
+            projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+            simhash_rank=4,
+            seed=0,
+        )
+        base_query = rng.standard_normal((40, DIM)).astype(np.float32)
+        similar_doc = base_query + 0.1 * rng.standard_normal((40, DIM)).astype(np.float32)
+        random_doc = rng.standard_normal((40, DIM)).astype(np.float32)
+
+        q_fde = enc.encode_query(base_query)
+        score_similar = float(q_fde @ enc.encode_document(similar_doc))
+        score_random = float(q_fde @ enc.encode_document(random_doc))
+        assert score_similar > score_random, (
+            f"LR SimHash failed to rank similar ({score_similar:.3f}) "
+            f"above random ({score_random:.3f})"
+        )
+
+    def test_lr_positive_score_for_same_cloud(self, rng: np.random.Generator) -> None:
+        """FDE dot product should be positive when query and doc share the same tokens."""
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            num_repetitions=4,
+            projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+            simhash_rank=3,
+            seed=0,
+        )
+        cloud = rng.standard_normal((50, DIM)).astype(np.float32)
+        assert float(enc.encode_query(cloud) @ enc.encode_document(cloud)) > 0
+
+    def test_fill_empty_partitions_compatible(self, rng: np.random.Generator) -> None:
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            num_repetitions=2,
+            projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+            simhash_rank=3,
+            fill_empty_partitions=True,
+            seed=0,
+        )
+        cloud = rng.standard_normal((200, DIM)).astype(np.float32)
+        fde = enc.encode_document(cloud)
+        assert fde.shape == (enc.fde_dimension,)
+        assert fde.dtype == np.float32
+
+    def test_repr_includes_simhash_rank(self) -> None:
+        enc = self._lr_enc(rank=4, k=5)
+        r = repr(enc)
+        assert "LOW_RANK_GAUSSIAN" in r
+        assert "simhash_rank=4" in r
+
+    def test_repr_omits_simhash_rank_for_identity(self) -> None:
+        enc = MUVERAEncoder(dimension=DIM)
+        assert "simhash_rank" not in repr(enc)
+
+    def test_batch_shapes(self, rng: np.random.Generator) -> None:
+        enc = self._lr_enc()
+        qs = [rng.standard_normal((20, DIM)).astype(np.float32) for _ in range(4)]
+        ds = [rng.standard_normal((80, DIM)).astype(np.float32) for _ in range(6)]
+        assert enc.encode_queries_batch(qs).shape == (4, enc.fde_dimension)
+        assert enc.encode_documents_batch(ds).shape == (6, enc.fde_dimension)
+
+    def test_zero_simhash_projections_with_low_rank(self, rng: np.random.Generator) -> None:
+        # num_simhash_projections=0 means single partition; low-rank factors
+        # are never built (rank constraint doesn't apply when k=0)
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=0,
+            projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+            simhash_rank=1,
+        )
+        cloud = rng.standard_normal((20, DIM)).astype(np.float32)
+        out = enc.encode_query(cloud)
+        assert out.shape == (DIM,)
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
 
 
 class TestEdgeCases:
@@ -250,6 +482,11 @@ class TestEdgeCases:
     def test_float64_input_coerced(self, default_enc: MUVERAEncoder) -> None:
         out = default_enc.encode_query(np.random.randn(20, DIM))
         assert out.dtype == np.float32
+
+
+# ---------------------------------------------------------------------------
+# Low-level functional API
+# ---------------------------------------------------------------------------
 
 
 class TestFunctionalAPI:

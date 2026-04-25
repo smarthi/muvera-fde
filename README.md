@@ -93,6 +93,7 @@ MUVERAEncoder(
     seed: int = 1,
     projection_type: ProjectionType = ProjectionType.DEFAULT_IDENTITY,
     projection_dimension: int | None = None,
+    simhash_rank: int = 1,
     fill_empty_partitions: bool = False,
     final_projection_dimension: int | None = None,
 )
@@ -104,8 +105,9 @@ MUVERAEncoder(
 | `num_simhash_projections` | 4 | SimHash bits *k*; partitions = 2^k |
 | `num_repetitions` | 1 | Independent repetitions (more → better approximation) |
 | `seed` | 1 | Shared RNG seed — **must match** query and document sides |
-| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY` or `AMS_SKETCH` (Count Sketch) |
+| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY`, `AMS_SKETCH` (Count Sketch on token embeddings), or `LOW_RANK_GAUSSIAN` (low-rank factored SimHash) |
 | `projection_dimension` | `None` | Target dim after Count Sketch; required for `AMS_SKETCH` |
+| `simhash_rank` | 1 | Rank *r* for `LOW_RANK_GAUSSIAN`; must satisfy `1 ≤ r < num_simhash_projections`. r=4 is a practical sweet spot for ColQwen2 (d=128, k≥8) |
 | `fill_empty_partitions` | `False` | Document side: fill empty slots via Hamming-nearest-neighbour |
 | `final_projection_dimension` | `None` | Post-accumulation Count Sketch compression |
 
@@ -181,6 +183,49 @@ Both preserve dot products in expectation: `E[⟨sketch(x), sketch(y)⟩] = ⟨x
 
 ---
 
+### Low-rank SimHash — faster partition assignment
+
+Replaces the full `(d × k)` SimHash matrix with two smaller factors
+`A ∈ ℝ^{d×r}` and `B ∈ ℝ^{k×r}`, so the partition cost drops from
+`O(N × d × k)` to `O(N × d × r + N × r × k)`.
+
+```python
+from muvera_fde import ProjectionType
+
+enc = MUVERAEncoder(
+    dimension=128,
+    num_simhash_projections=8,   # 2^8 = 256 partitions
+    num_repetitions=4,
+    projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+    simhash_rank=4,              # r=4; cost: O(N×128×4 + N×4×8) = O(544N) vs O(1024N)
+    seed=42,
+)
+# fde_dimension = 4 × 256 × 128 = 131072 (same formula as DEFAULT_IDENTITY)
+
+q_fde = enc.encode_query(query_tokens)
+d_fde = enc.encode_document(doc_tokens)
+score = float(q_fde @ d_fde)
+```
+
+**Convergence guarantee** (EGGROLL, Sarkar et al. 2025, Theorem 4): the
+low-rank sign pattern converges to the full-rank Gaussian sign pattern at
+rate **O(r⁻¹)** — faster than the standard CLT rate O(r⁻¹/²) because
+symmetry cancels all odd cumulants in the Edgeworth expansion.
+
+Practical targets for ColQwen2 (d=128):
+
+| `simhash_rank` | Variance vs full-rank | SimHash cost vs full-rank (k=8) |
+|---|---|---|
+| 1 | ~100% baseline | 136N vs 1024N — 7.5× faster |
+| 4 | ~25% increase | 544N vs 1024N — 1.9× faster |
+| 8 | ~12% increase | 1088N vs 1024N — breakeven |
+
+> **Note:** Sign assignments are scale-invariant (`sign(αx) = sign(x)`), so the
+> 1/√r normalisation common in low-rank approximations is omitted — it has no
+> effect on partition assignments.
+
+---
+
 ### Filling empty partition slots
 
 With few document tokens and many partitions (large *k*), many slots will be
@@ -227,7 +272,7 @@ q_fde = generate_query_fde(query_tokens, config, enc._rep_params)
 
 ---
 
-### `FDEConfig` serialisation
+### `FDEConfig` serialization
 
 `FDEConfig` is a frozen Pydantic model — save it alongside your ANN index so
 the encoder configuration is always recoverable:

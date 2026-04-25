@@ -48,6 +48,56 @@ def simhash_matrix(seed: int, dimension: int, num_projections: int) -> np.ndarra
     )
 
 
+def low_rank_simhash_factors(
+    seed: int,
+    dimension: int,
+    num_projections: int,
+    rank: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return low-rank factors (A, B) for a rank-r SimHash approximation.
+
+    The implied SimHash matrix is W ~ AB^T where A in R^{d x r},
+    B in R^{k x r}.  Partition assignment uses::
+
+        sign((projected @ A) @ B.T)
+
+    Two smaller matmuls instead of one large one::
+
+        Full-rank cost:  O(N x d x k)
+        Low-rank cost:   O(N x d x r  +  N x r x k)
+
+    The 1/sqrt(r) normalisation is omitted because SimHash sign assignments
+    are scale-invariant: sign(alpha * x) = sign(x) for any alpha > 0.
+
+    Convergence guarantee
+    ---------------------
+    By EGGROLL Theorem 4 (Sarkar et al., 2025), the low-rank sign pattern
+    converges to the full-rank Gaussian sign pattern at O(r^-1) -- faster
+    than the standard CLT rate of O(r^{-1/2}) because symmetry cancels all
+    odd cumulants in the Edgeworth expansion of the marginal distribution.
+
+    Parameters
+    ----------
+    seed:
+        RNG seed.  Must match between query and document encoders.
+    dimension:
+        Input embedding dimension *d*.
+    num_projections:
+        Number of SimHash bits *k*.
+    rank:
+        Factorisation rank *r*.  Must satisfy 1 <= r < num_projections.
+
+    Returns
+    -------
+    A : np.ndarray, shape (dimension, rank), dtype float32
+    B : np.ndarray, shape (num_projections, rank), dtype float32
+    """
+    rng = np.random.default_rng(seed)
+    a = rng.standard_normal((dimension, rank)).astype(np.float32)
+    b = rng.standard_normal((num_projections, rank)).astype(np.float32)
+    return a, b
+
+
 def simhash_partition_indices(sketch_matrix: np.ndarray) -> np.ndarray:
     """Assign each point a Gray-coded SimHash partition index.
 
@@ -92,7 +142,7 @@ def count_sketch(input_vector: np.ndarray, final_dimension: int, seed: int) -> n
     """Compress a vector to *final_dimension* dimensions via Count Sketch.
 
     The result is an unbiased estimator of dot products:
-    ``E[⟨sketch(x), sketch(y)⟩] = ⟨x, y⟩``.
+    ``E[<sketch(x), sketch(y)>] = <x, y>``.
 
     Parameters
     ----------

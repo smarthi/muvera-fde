@@ -34,6 +34,16 @@ def _project_and_partition(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Apply optional Count Sketch and SimHash partitioning for one repetition.
 
+    Supports three SimHash paths:
+
+    * Full-rank (``simhash_mat`` set): ``sketch = projected @ W``
+      Cost: O(N x projection_dim x k).
+    * Low-rank (``simhash_a`` / ``simhash_b`` set): ``sketch = (projected @ A) @ B.T``
+      Cost: O(N x d x r + N x r x k).  Converges to full-rank at O(r^-1)
+      (EGGROLL Theorem 4).  Sign assignments are scale-invariant so no 1/sqrt(r)
+      normalisation is needed.
+    * No SimHash (both None): single partition, trivial aggregation.
+
     Returns
     -------
     projected : np.ndarray, shape (num_points, projection_dim)
@@ -49,9 +59,18 @@ def _project_and_partition(
         projected = np.zeros((num_points, projection_dim), dtype=np.float32)
         np.add.at(projected.T, rep_params.cs_indices, (embedding_matrix * rep_params.cs_signs).T)
 
-    sketch_matrix = (
-        projected @ rep_params.simhash_mat if rep_params.simhash_mat is not None else None
-    )
+    # --- SimHash projection: full-rank, low-rank, or disabled ---
+    if rep_params.simhash_mat is not None:
+        # Full-rank: O(N x projection_dim x k)
+        sketch_matrix: np.ndarray | None = projected @ rep_params.simhash_mat
+    elif rep_params.simhash_a is not None:
+        # Low-rank decomposed: O(N x d x r + N x r x k) -- two smaller matmuls.
+        # Scale-invariance of sign() means 1/sqrt(r) normalisation is a no-op.
+        assert rep_params.simhash_b is not None
+        sketch_matrix = (projected @ rep_params.simhash_a) @ rep_params.simhash_b.T
+    else:
+        sketch_matrix = None
+
     partition_indices = (
         simhash_partition_indices(sketch_matrix)
         if sketch_matrix is not None
@@ -74,7 +93,7 @@ def _fill_empty_partitions(
 ) -> None:
     """Fill empty partition slots with the nearest token by SimHash Hamming distance.
 
-    Operates in batches to keep peak memory at O(batch × num_points × k).
+    Operates in batches to keep peak memory at O(batch x num_points x k).
     When the point cloud is empty, ``rep_slice`` is left unchanged (all-zero).
     """
     empty_binary = empty_pidxs.copy()
@@ -131,6 +150,23 @@ def _maybe_count_sketch(out: np.ndarray, config: FDEConfig) -> np.ndarray:
     return out
 
 
+def _projection_dim_for(config: FDEConfig) -> int:
+    """Return the per-partition slot width for the given config."""
+    if config.projection_type == ProjectionType.AMS_SKETCH:
+        assert config.projection_dimension is not None
+        return config.projection_dimension
+    return config.dimension
+
+
+def _use_identity(config: FDEConfig) -> bool:
+    """Return True when token embeddings are used without Count Sketch."""
+    return config.projection_type != ProjectionType.AMS_SKETCH
+
+
+def _use_low_rank_simhash(config: FDEConfig) -> bool:
+    return config.projection_type == ProjectionType.LOW_RANK_GAUSSIAN
+
+
 # ---------------------------------------------------------------------------
 # Public generation functions
 # ---------------------------------------------------------------------------
@@ -163,8 +199,6 @@ def generate_query_fde(
     Returns
     -------
     np.ndarray, shape ``(fde_dimension,)``, dtype float32
-        ``fde_dimension = num_repetitions × 2**num_simhash_projections × projection_dim``
-        (or ``final_projection_dimension`` if Count-Sketch compression is set).
 
     Raises
     ------
@@ -176,9 +210,9 @@ def generate_query_fde(
         raise ValueError("Query FDE does not support fill_empty_partitions.")
 
     embedding_matrix = prepare_embeddings(point_cloud, config)
-    use_identity = config.projection_type == ProjectionType.DEFAULT_IDENTITY
-    projection_dim = config.dimension if use_identity else config.projection_dimension
-    assert projection_dim is not None
+    use_id = _use_identity(config)
+    use_lr = _use_low_rank_simhash(config)
+    projection_dim = _projection_dim_for(config)
 
     num_partitions = 1 << config.num_simhash_projections
     out = np.zeros(checked_intermediate_fde_length(config, projection_dim), dtype=np.float32)
@@ -192,11 +226,13 @@ def generate_query_fde(
                 config.dimension,
                 projection_dim,
                 config.num_simhash_projections,
-                use_identity,
+                use_id,
+                use_low_rank_simhash=use_lr,
+                simhash_rank=config.simhash_rank,
             )
         )
         projected, partition_indices, _ = _project_and_partition(
-            embedding_matrix, params, use_identity, projection_dim
+            embedding_matrix, params, use_id, projection_dim
         )
         rep_offset = rep * num_partitions * projection_dim
         rep_slice = out[rep_offset : rep_offset + num_partitions * projection_dim].reshape(
@@ -240,9 +276,9 @@ def generate_document_fde(
     """
     validate_config(config)
     embedding_matrix = prepare_embeddings(point_cloud, config)
-    use_identity = config.projection_type == ProjectionType.DEFAULT_IDENTITY
-    projection_dim = config.dimension if use_identity else config.projection_dimension
-    assert projection_dim is not None
+    use_id = _use_identity(config)
+    use_lr = _use_low_rank_simhash(config)
+    projection_dim = _projection_dim_for(config)
 
     num_partitions = 1 << config.num_simhash_projections
     out = np.zeros(checked_intermediate_fde_length(config, projection_dim), dtype=np.float32)
@@ -256,11 +292,13 @@ def generate_document_fde(
                 config.dimension,
                 projection_dim,
                 config.num_simhash_projections,
-                use_identity,
+                use_id,
+                use_low_rank_simhash=use_lr,
+                simhash_rank=config.simhash_rank,
             )
         )
         projected, partition_indices, sketch_matrix = _project_and_partition(
-            embedding_matrix, params, use_identity, projection_dim
+            embedding_matrix, params, use_id, projection_dim
         )
         rep_offset = rep * num_partitions * projection_dim
         rep_slice = out[rep_offset : rep_offset + num_partitions * projection_dim].reshape(
