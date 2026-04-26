@@ -109,7 +109,7 @@ class ProjectionType(enum.Enum):
     Theoretical guarantees (Woolfe, Liberty, Rokhlin & Tygert, 2008;
     building on Ailon & Chazelle, 2006 Fast Johnson-Lindenstrauss Transform):
 
-    * Johnson-Lindenstrauss guarantee: pairwise distances preserved to eps with high probability
+    * JL guarantee: pairwise distances preserved to eps with high probability
     * Cost: O(d log d) per token -- sub-quadratic in d
     * No approximation vs full-rank Gaussian when k <= d (exact JL)
 
