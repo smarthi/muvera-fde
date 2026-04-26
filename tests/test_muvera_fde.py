@@ -519,3 +519,151 @@ class TestFunctionalAPI:
             default_enc.encode_document(doc_cloud),
             generate_document_fde(doc_cloud, config, default_enc._rep_params),
         )
+
+
+# ---------------------------------------------------------------------------
+# SRHT SimHash
+# ---------------------------------------------------------------------------
+
+
+class TestSRHTProjection:
+    """Tests for the Subsampled Randomized Hadamard Transform SimHash."""
+
+    def _srht_enc(self, k: int = 4, reps: int = 2) -> MUVERAEncoder:
+        return MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=k,
+            num_repetitions=reps,
+            projection_type=ProjectionType.SRHT,
+            seed=77,
+        )
+
+    def test_output_shape(self, rng: np.random.Generator) -> None:
+        enc = self._srht_enc()
+        cloud = rng.standard_normal((50, DIM)).astype(np.float32)
+        # fde_dimension = reps x 2^k x dimension (same as DEFAULT_IDENTITY)
+        expected = 2 * (1 << 4) * DIM
+        assert enc.fde_dimension == expected
+        assert enc.encode_query(cloud).shape == (expected,)
+        assert enc.encode_document(cloud).shape == (expected,)
+
+    def test_dtype(self, rng: np.random.Generator) -> None:
+        enc = self._srht_enc()
+        cloud = rng.standard_normal((30, DIM)).astype(np.float32)
+        assert enc.encode_query(cloud).dtype == np.float32
+        assert enc.encode_document(cloud).dtype == np.float32
+
+    def test_deterministic(self, rng: np.random.Generator) -> None:
+        enc = self._srht_enc()
+        cloud = rng.standard_normal((30, DIM)).astype(np.float32)
+        np.testing.assert_array_equal(enc.encode_query(cloud), enc.encode_query(cloud))
+        np.testing.assert_array_equal(enc.encode_document(cloud), enc.encode_document(cloud))
+
+    def test_different_seeds_give_different_fdes(self, rng: np.random.Generator) -> None:
+        cloud = rng.standard_normal((40, DIM)).astype(np.float32)
+        enc1 = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            projection_type=ProjectionType.SRHT,
+            seed=1,
+        )
+        enc2 = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            projection_type=ProjectionType.SRHT,
+            seed=2,
+        )
+        assert not np.array_equal(enc1.encode_query(cloud), enc2.encode_query(cloud))
+
+    def test_k_exceeds_padded_dim_raises(self) -> None:
+        # dimension=2 -> padded_dim=2; k=3 > 2 but k=3 <= MAX(30), so only _check_srht fires
+        with pytest.raises(ValueError, match="SRHT requires"):
+            MUVERAEncoder(
+                dimension=2,
+                num_simhash_projections=3,  # > next_power_of_2(2) = 2
+                projection_type=ProjectionType.SRHT,
+            )
+
+    def test_approximates_chamfer_similarity(self, rng: np.random.Generator) -> None:
+        """SRHT SimHash should rank similar docs above random docs."""
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            num_repetitions=6,
+            projection_type=ProjectionType.SRHT,
+            seed=0,
+        )
+        base_query = rng.standard_normal((40, DIM)).astype(np.float32)
+        similar_doc = base_query + 0.1 * rng.standard_normal((40, DIM)).astype(np.float32)
+        random_doc = rng.standard_normal((40, DIM)).astype(np.float32)
+        q_fde = enc.encode_query(base_query)
+        assert float(q_fde @ enc.encode_document(similar_doc)) > float(
+            q_fde @ enc.encode_document(random_doc)
+        )
+
+    def test_positive_score_same_cloud(self, rng: np.random.Generator) -> None:
+        enc = self._srht_enc(k=4, reps=4)
+        cloud = rng.standard_normal((50, DIM)).astype(np.float32)
+        assert float(enc.encode_query(cloud) @ enc.encode_document(cloud)) > 0
+
+    def test_fill_empty_partitions_compatible(self, rng: np.random.Generator) -> None:
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            num_repetitions=2,
+            projection_type=ProjectionType.SRHT,
+            fill_empty_partitions=True,
+            seed=0,
+        )
+        cloud = rng.standard_normal((200, DIM)).astype(np.float32)
+        fde = enc.encode_document(cloud)
+        assert fde.shape == (enc.fde_dimension,)
+        assert fde.dtype == np.float32
+
+    def test_batch_shapes(self, rng: np.random.Generator) -> None:
+        enc = self._srht_enc()
+        qs = [rng.standard_normal((20, DIM)).astype(np.float32) for _ in range(4)]
+        ds = [rng.standard_normal((80, DIM)).astype(np.float32) for _ in range(6)]
+        assert enc.encode_queries_batch(qs).shape == (4, enc.fde_dimension)
+        assert enc.encode_documents_batch(ds).shape == (6, enc.fde_dimension)
+
+    def test_non_power_of_2_dimension_padded(self, rng: np.random.Generator) -> None:
+        """d=24 (not power of 2) is padded to 32 -- k <= 32 must hold."""
+        enc = MUVERAEncoder(
+            dimension=24,
+            num_simhash_projections=4,
+            projection_type=ProjectionType.SRHT,
+            seed=0,
+        )
+        cloud = rng.standard_normal((30, 24)).astype(np.float32)
+        out = enc.encode_query(cloud)
+        # fde_dimension = 1 x 2^4 x 24 = 384
+        assert out.shape == (1 * 16 * 24,)
+
+    def test_repr_shows_srht(self) -> None:
+        enc = self._srht_enc()
+        assert "SRHT" in repr(enc)
+
+    def test_zero_simhash_projections_srht(self, rng: np.random.Generator) -> None:
+        """k=0 with SRHT: no SRHT params built, single partition."""
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=0,
+            projection_type=ProjectionType.SRHT,
+        )
+        cloud = rng.standard_normal((20, DIM)).astype(np.float32)
+        assert enc.encode_query(cloud).shape == (DIM,)
+
+    def test_fwht_correctness(self) -> None:
+        """Verify the butterfly FWHT against a known 4-element transform."""
+        from muvera_fde._internal.sketch import _fwht_batch
+
+        x = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+        result = _fwht_batch(x)
+        # H @ e_0 = [1, 1, 1, 1] (unnormalised)
+        np.testing.assert_allclose(result, [[1.0, 1.0, 1.0, 1.0]], atol=1e-5)
+
+        x2 = np.array([[1.0, -1.0, 1.0, -1.0]], dtype=np.float32)
+        result2 = _fwht_batch(x2)
+        # H @ [1,-1,1,-1] = [0, 4, 0, 0] in Hadamard-ordered butterfly
+        np.testing.assert_allclose(result2, [[0.0, 4.0, 0.0, 0.0]], atol=1e-5)
