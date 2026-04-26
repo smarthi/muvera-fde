@@ -90,7 +90,7 @@ def low_rank_simhash_factors(
     num_projections:
         Number of SimHash bits *k*.
     rank:
-        Factorization rank *r*.  Must satisfy 1 <= r < num_projections.
+        Factorisation rank *r*.  Must satisfy 1 <= r < num_projections.
 
     Returns
     -------
@@ -160,7 +160,8 @@ def srht_params(
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Return SRHT parameters: Rademacher signs, subsample indices, padded dim.
 
-    The SRHT (Ailon & Chazelle, 2009) computes::
+    The SRHT (Woolfe, Liberty, Rokhlin & Tygert, 2008; building on
+    Ailon & Chazelle, 2006 Fast Johnson-Lindenstrauss Transform) computes::
 
         S H D x
 
@@ -213,10 +214,10 @@ def apply_srht(
 
         1. Zero-pad each row from d to padded_dim (next power of 2).
         2. Element-wise multiply by Rademacher signs D.
-        3. Apply unnormalized Walsh-Hadamard transform H.
+        3. Apply unnormalised Walsh-Hadamard transform H.
         4. Subsample k columns according to sample_indices.
 
-    Normalization (1/sqrt(k)) is omitted -- SimHash uses only the sign
+    Normalisation (1/sqrt(k)) is omitted -- SimHash uses only the sign
     of the output, which is scale-invariant.
 
     Parameters

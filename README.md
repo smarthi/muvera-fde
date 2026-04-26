@@ -8,7 +8,8 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A pure-Python port of Google's graph-mining MUVERA implementation, extended with
-**low-rank SimHash factorisation** inspired by the EGGROLL paper (Sarkar et al., 2025).
+**low-rank SimHash factorisation** (EGGROLL, Sarkar et al., 2025) and
+**Subsampled Randomized Hadamard Transform** (SRHT, Woolfe, Liberty, Rokhlin & Tygert, 2008) SimHash modes.
 
 | | Reference |
 |---|---|
@@ -29,7 +30,7 @@ library adds two new SimHash projection modes, each with distinct cost/quality t
 Theorem 4): O(r⁻¹) convergence to the full-rank Gaussian sign pattern. At `r=4`
 with ColQwen2 (d=128, k=8): **~1.9× faster**, ~25% variance increase.
 
-**`SRHT`** (Subsampled Randomized Hadamard Transform, Ailon & Chazelle 2009) applies
+**`SRHT`** (Subsampled Randomized Hadamard Transform, Woolfe, Liberty, Rokhlin & Tygert, 2008) applies
 a structured `S·H·D` transform — random sign flip, Walsh-Hadamard, random row
 subsample — at `O(N·d·log d)` cost, independent of k. It carries a **full JL
 guarantee** with zero rank-approximation error, making it the theoretically safest
@@ -106,7 +107,7 @@ score = float(q_fde @ d_fde)
 
 ### `MUVERAEncoder`
 
-The primary entry point. Initialise **once** and reuse for all queries and
+The primary entry point. Initialize **once** and reuse for all queries and
 documents — the random partition structure (SimHash matrices, Count Sketch
 parameters) must be identical on both sides.
 
@@ -248,15 +249,33 @@ enc = MUVERAEncoder(
 )
 ```
 
-**Convergence** (EGGROLL, Sarkar et al. 2025, Theorem 4): O(r⁻¹) convergence
-to full-rank Gaussian — faster than the CLT rate O(r⁻¹/²) because symmetry
-cancels all odd cumulants in the Edgeworth expansion.
+**Convergence** (EGGROLL, Sarkar et al. 2025, Theorem 4): the low-rank sign
+pattern converges to the full-rank Gaussian at **O(r⁻¹)** — faster than the
+**CLT rate of O(r⁻¹/²)**.
 
-| `simhash_rank` | Variance vs full-rank | Cost (k=8) | Speedup |
+**What is the CLT rate?** The Central Limit Theorem tells us that averaging *n*
+independent random variables reduces error at O(n⁻¹/²) — the square root of the
+sample size. This is the default convergence rate for most random approximations.
+EGGROLL beats it because the low-rank matrix AB⊤ has a *symmetric* distribution:
+the sign of each projection is equally likely to be ±1, which causes all **odd
+cumulants** (1st, 3rd, 5th order terms) in the Edgeworth expansion to cancel
+exactly. Since those odd terms are what normally contribute O(r⁻¹/²) error,
+their cancellation pushes the leading error down to O(r⁻¹) — the same mechanism
+that makes symmetric random walks converge faster than asymmetric ones.
+
+| `simhash_rank` r | CLT rate O(r⁻¹/²) | EGGROLL rate O(r⁻¹) | Speedup vs baseline |
 |---|---|---|---|
-| 1 | ~100% baseline | 136N ops | 7.5× |
-| 4 | ~25% increase | 544N ops | 1.9× |
-| 8 | ~12% increase | 1088N ops | ~breakeven |
+| 4 | ~50% error | **~25% error** | 1.9× |
+| 9 | ~33% error | **~11% error** | — |
+| 16 | ~25% error | **~6% error** | — |
+
+Cost breakdown for ColQwen2 (d=128, k=8):
+
+| `simhash_rank` | SimHash cost | Speedup |
+|---|---|---|
+| 1 | 136N ops | 7.5× |
+| 4 | 544N ops | 1.9× |
+| 8 | 1088N ops | ~breakeven |
 
 > The 1/√r normalisation is omitted — SimHash sign assignments are
 > scale-invariant (`sign(αx) = sign(x)`), so it has no effect.
@@ -282,7 +301,7 @@ enc = MUVERAEncoder(
     seed=42,
 )
 # SimHash cost: O(N × 128 × log₂(128) + N × 8) = O(N × 128 × 7 + N × 8) = 904N ops
-# No rank approximation error — full JL guarantee (Ailon & Chazelle, 2009)
+# No rank approximation error — full JL guarantee (Woolfe, Liberty, Rokhlin & Tygert, 2008)
 # Constraint: num_simhash_projections <= next_power_of_2(dimension)
 ```
 
@@ -309,7 +328,7 @@ full-rank Gaussian quality at `k = d`.
   Use r=4 for ColQwen2. Becomes more attractive as k grows (cost scales as O(r) not O(k)).
 * **`SRHT`** — when you need full JL quality at sub-quadratic cost, or when k is large
   (SRHT cost is O(d log d) regardless of k). Preferred for precision-critical workloads
-  like legal/tax document retrieval at WK where recall matters.
+  like legal/tax document retrieval where recall matters.
 
 ---
 
