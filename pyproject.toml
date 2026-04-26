@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Project metadata
 # ---------------------------------------------------------------------------
 [project]
-name = "muvera-fde"
+name = "pymuvera"
 version = "0.3.0"
 description = "Fixed Dimensional Encodings for multi-vector retrieval (MUVERA) — Python port of Google's graph-mining implementation"
 readme = "README.md"
