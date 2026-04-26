@@ -89,7 +89,7 @@ class MUVERAEncoder:
         simhash_rank: int = 1,
         fill_empty_partitions: bool = False,
         final_projection_dimension: int | None = None,
-    ) -> None:
+    ):
         self._base_config: dict = dict(
             dimension=dimension,
             num_repetitions=num_repetitions,

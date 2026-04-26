@@ -108,7 +108,7 @@ class ProjectionType(enum.Enum):
 
     Theoretical guarantees (Ailon & Chazelle, 2009):
 
-    * JL guarantee: pairwise distances preserved to eps with high probability
+    * Johnson - Lindenstrauss (JL) guarantee: pairwise distances preserved to eps with high probability
     * Cost: O(d log d) per token -- sub-quadratic in d
     * No approximation vs full-rank Gaussian when k <= d (exact JL)
 
@@ -119,7 +119,7 @@ class ProjectionType(enum.Enum):
     * SRHT: O(N x 128 x 7 + N x 8) = 904N ops
 
     SRHT has stronger theoretical guarantees than LOW_RANK_GAUSSIAN (no rank
-    approximation error -- it IS a full JL projection, just structured) but
+    approximation error -- it IS a full Johnson Lindenstrauss(JL) projection, just structured) but
     is slower than LOW_RANK_GAUSSIAN for small r.  Choose SRHT when you need
     full JL quality with sub-quadratic cost; choose LOW_RANK_GAUSSIAN when
     speed dominates and mild approximation error is acceptable.

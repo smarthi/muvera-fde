@@ -71,7 +71,7 @@ def low_rank_simhash_factors(
         Full-rank cost:  O(N x d x k)
         Low-rank cost:   O(N x d x r  +  N x r x k)
 
-    The 1/sqrt(r) normalisation is omitted because SimHash sign assignments
+    The 1/sqrt(r) normalization is omitted because SimHash sign assignments
     are scale-invariant: sign(alpha * x) = sign(x) for any alpha > 0.
 
     Convergence guarantee
@@ -90,7 +90,7 @@ def low_rank_simhash_factors(
     num_projections:
         Number of SimHash bits *k*.
     rank:
-        Factorisation rank *r*.  Must satisfy 1 <= r < num_projections.
+        Factorization rank *r*.  Must satisfy 1 <= r < num_projections.
 
     Returns
     -------
@@ -119,7 +119,7 @@ def _next_power_of_2(n: int) -> int:
 
 
 def _fwht_batch(x: np.ndarray) -> np.ndarray:
-    """Unnormalised Walsh-Hadamard transform applied row-wise.
+    """Unnormalized Walsh-Hadamard transform applied row-wise.
 
     Uses the iterative butterfly algorithm: O(N x d x log(d)) time,
     O(N x d) space (in-place on a copy).  Requires x.shape[-1] to be
@@ -133,8 +133,8 @@ def _fwht_batch(x: np.ndarray) -> np.ndarray:
     Returns
     -------
     np.ndarray, shape (N, d), dtype float32
-        Walsh-Hadamard transform of each row.  NOT normalised by 1/sqrt(d);
-        normalisation is skipped because SimHash uses only the sign of the
+        Walsh-Hadamard transform of each row.  NOT normalized by 1/sqrt(d);
+        normalization is skipped because SimHash uses only the sign of the
         output, which is scale-invariant.
     """
     out = x.copy()
@@ -173,7 +173,7 @@ def srht_params(
     The input *x* is zero-padded to ``padded_dim = next_power_of_2(dimension)``
     before applying H, making the transform valid for any embedding dimension.
 
-    The 1/sqrt(k) normalisation is omitted: sign assignments are scale-invariant.
+    The 1/sqrt(k) normalization is omitted: sign assignments are scale-invariant.
 
     Parameters
     ----------
@@ -213,10 +213,10 @@ def apply_srht(
 
         1. Zero-pad each row from d to padded_dim (next power of 2).
         2. Element-wise multiply by Rademacher signs D.
-        3. Apply unnormalised Walsh-Hadamard transform H.
+        3. Apply unnormalized Walsh-Hadamard transform H.
         4. Subsample k columns according to sample_indices.
 
-    Normalisation (1/sqrt(k)) is omitted -- SimHash uses only the sign
+    Normalization (1/sqrt(k)) is omitted -- SimHash uses only the sign
     of the output, which is scale-invariant.
 
     Parameters
