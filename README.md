@@ -2,8 +2,8 @@
 
 **Fixed Dimensional Encodings for multi-vector retrieval.**
 
-[![PyPI](https://img.shields.io/pypi/v/muvera-fde)](https://pypi.org/project/muvera-fde/)
-[![Python](https://img.shields.io/pypi/pyversions/muvera-fde)](https://pypi.org/project/muvera-fde/)
+[![PyPI](https://img.shields.io/pypi/v/muvera-fde)](https://pypi.org/project/pymuvera/)
+[![Python](https://img.shields.io/pypi/pyversions/muvera-fde)](https://pypi.org/project/pymuvera/)
 [![CI](https://github.com/smarthi/muvera-fde/actions/workflows/ci.yml/badge.svg)](https://github.com/smarthi/muvera-fde/actions)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
