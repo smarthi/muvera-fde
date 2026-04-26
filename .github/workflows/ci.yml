@@ -55,7 +55,7 @@ jobs:
 
     environment:
       name: pypi
-      url: https://pypi.org/p/muvera-fde
+      url: https://pypi.org/p/pymuvera
 
     permissions:
       id-token: write

@@ -40,7 +40,7 @@ vectors directly, restoring sub-linear retrieval for late-interaction models.
 ## Installation
 
 ```bash
-pip install muvera-fde
+pip install pymuvera
 ```
 
 Requires Python ≥ 3.12, NumPy ≥ 1.24, Pydantic ≥ 2.0.
