@@ -10,10 +10,10 @@
 A pure-Python port of Google's graph-mining MUVERA implementation, extended with
 **low-rank SimHash factorisation** inspired by the EGGROLL paper (Sarkar et al., 2025).
 
-| | Reference |
-|---|---|
-| MUVERA paper | [Rajput et al., 2024](https://arxiv.org/abs/2405.19504) |
-| EGGROLL paper | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf) |
+| | Reference                                                                                     |
+|---|-----------------------------------------------------------------------------------------------|
+| MUVERA paper | [Dhulipala et al., 2024](https://arxiv.org/abs/2405.19504)                                    |
+| EGGROLL paper | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf)                          |
 | Original C++ implementation | [google/graph-mining](https://github.com/google/graph-mining/tree/main/sketching/point_cloud) |
 
 ---
