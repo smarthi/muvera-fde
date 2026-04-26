@@ -1,14 +1,36 @@
-# Implementation of MUVERA: Retrieval via Fixed Dimension Encodings
+# pymuvera — MUVERA + EGGROLL: Fixed Dimensional Encodings for Multi-Vector Retrieval
 
-**Fixed Dimensional Encodings for multi-vector retrieval.**
+**Sub-linear ANN retrieval for ColBERT, ColPali, and ColQwen2.**
 
-[![PyPI](https://img.shields.io/pypi/v/muvera-fde)](https://pypi.org/project/pymuvera/)
-[![Python](https://img.shields.io/pypi/pyversions/muvera-fde)](https://pypi.org/project/pymuvera/)
+[![PyPI](https://img.shields.io/pypi/v/pymuvera)](https://pypi.org/project/pymuvera/)
+[![Python](https://img.shields.io/pypi/pyversions/pymuvera)](https://pypi.org/project/pymuvera/)
 [![CI](https://github.com/smarthi/muvera-fde/actions/workflows/ci.yml/badge.svg)](https://github.com/smarthi/muvera-fde/actions)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-A Python port of Google's graph-mining MUVERA implementation.  
-Paper: [MUVERA: Multi-Vector Retrieval via Fixed Dimensional Encodings](https://arxiv.org/abs/2405.19504) (Rajput et al., 2024).
+A pure-Python port of Google's graph-mining MUVERA implementation, extended with
+**low-rank SimHash factorisation** inspired by the EGGROLL paper (Sarkar et al., 2025).
+
+| | Reference |
+|---|---|
+| MUVERA paper | [Rajput et al., 2024](https://arxiv.org/abs/2405.19504) |
+| EGGROLL paper | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf) |
+| Original C++ implementation | [google/graph-mining](https://github.com/google/graph-mining/tree/main/sketching/point_cloud) |
+
+---
+
+## What this library adds beyond the original paper
+
+The MUVERA paper uses a full-rank Gaussian matrix for SimHash partitioning — a
+random `(d × k)` draw every time. This library adds `LOW_RANK_GAUSSIAN`, a new
+projection mode that **factors the SimHash matrix as AB⊤** (where `A ∈ ℝ^{d×r}`,
+`B ∈ ℝ^{k×r}`, `r ≪ k`), cutting partition compute from `O(N·d·k)` to
+`O(N·d·r + N·r·k)`.
+
+The theoretical backing comes from EGGROLL (Sarkar et al., 2025, Theorem 4): the
+low-rank sign pattern converges to the full-rank Gaussian sign pattern at **O(r⁻¹)**
+— faster than the standard CLT rate of O(r⁻¹/²) — because symmetry cancels all odd
+cumulants in the Edgeworth expansion. At `r=4` with ColQwen2 (d=128, k=8) that is
+**~1.9× faster** partition assignment with only ~25% variance increase.
 
 ---
 
@@ -183,7 +205,7 @@ Both preserve dot products in expectation: `E[⟨sketch(x), sketch(y)⟩] = ⟨x
 
 ---
 
-### Low-rank SimHash — faster partition assignment
+### Low-rank SimHash — faster partition assignment (EGGROLL)
 
 Replaces the full `(d × k)` SimHash matrix with two smaller factors
 `A ∈ ℝ^{d×r}` and `B ∈ ℝ^{k×r}`, so the partition cost drops from
@@ -355,6 +377,10 @@ _, candidate_ids = index.search(q_fde, k=100)   # stage 1: fast ANN
 Python port of the C++ implementation in
 [Google's graph-mining project](https://github.com/google/graph-mining/tree/main/sketching/point_cloud),
 licensed under Apache 2.0.
+
+Low-rank SimHash extension inspired by
+[EGGROLL: Evolution Strategies at the Hyperscale](https://eshyperscale.github.io/imgs/paper.pdf)
+(Sarkar et al., 2025).
 
 See [NOTICE](NOTICE) for the full upstream attribution.
 
