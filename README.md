@@ -10,27 +10,30 @@
 A pure-Python port of Google's graph-mining MUVERA implementation, extended with
 **low-rank SimHash factorisation** inspired by the EGGROLL paper (Sarkar et al., 2025).
 
-| | Reference                                                                                     |
-|---|-----------------------------------------------------------------------------------------------|
-| MUVERA paper | [Dhulipala et al., 2024](https://arxiv.org/abs/2405.19504)                                    |
-| EGGROLL paper | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf)                          |
+| | Reference |
+|---|---|
+| MUVERA paper | [Rajput et al., 2024](https://arxiv.org/abs/2405.19504) |
+| EGGROLL paper | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf) |
 | Original C++ implementation | [google/graph-mining](https://github.com/google/graph-mining/tree/main/sketching/point_cloud) |
 
 ---
 
 ## What this library adds beyond the original paper
 
-The MUVERA paper uses a full-rank Gaussian matrix for SimHash partitioning — a
-random `(d × k)` draw every time. This library adds `LOW_RANK_GAUSSIAN`, a new
-projection mode that **factors the SimHash matrix as AB⊤** (where `A ∈ ℝ^{d×r}`,
-`B ∈ ℝ^{k×r}`, `r ≪ k`), cutting partition compute from `O(N·d·k)` to
-`O(N·d·r + N·r·k)`.
+The MUVERA paper uses a full-rank Gaussian matrix for SimHash partitioning. This
+library adds two new SimHash projection modes, each with distinct cost/quality tradeoffs:
 
-The theoretical backing comes from EGGROLL (Sarkar et al., 2025, Theorem 4): the
-low-rank sign pattern converges to the full-rank Gaussian sign pattern at **O(r⁻¹)**
-— faster than the standard CLT rate of O(r⁻¹/²) — because symmetry cancels all odd
-cumulants in the Edgeworth expansion. At `r=4` with ColQwen2 (d=128, k=8) that is
-**~1.9× faster** partition assignment with only ~25% variance increase.
+**`LOW_RANK_GAUSSIAN`** factors the SimHash matrix as AB⊤ (where `A ∈ ℝ^{d×r}`,
+`B ∈ ℝ^{k×r}`, `r ≪ k`), cutting partition compute from `O(N·d·k)` to
+`O(N·d·r + N·r·k)`. The theoretical backing is EGGROLL (Sarkar et al., 2025,
+Theorem 4): O(r⁻¹) convergence to the full-rank Gaussian sign pattern. At `r=4`
+with ColQwen2 (d=128, k=8): **~1.9× faster**, ~25% variance increase.
+
+**`SRHT`** (Subsampled Randomized Hadamard Transform, Ailon & Chazelle 2009) applies
+a structured `S·H·D` transform — random sign flip, Walsh-Hadamard, random row
+subsample — at `O(N·d·log d)` cost, independent of k. It carries a **full JL
+guarantee** with zero rank-approximation error, making it the theoretically safest
+choice. For ColQwen2 (d=128, k=8): **904N ops vs 1024N** for full-rank.
 
 ---
 
@@ -127,7 +130,7 @@ MUVERAEncoder(
 | `num_simhash_projections` | 4 | SimHash bits *k*; partitions = 2^k |
 | `num_repetitions` | 1 | Independent repetitions (more → better approximation) |
 | `seed` | 1 | Shared RNG seed — **must match** query and document sides |
-| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY`, `AMS_SKETCH` (Count Sketch on token embeddings), or `LOW_RANK_GAUSSIAN` (low-rank factored SimHash) |
+| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY`, `AMS_SKETCH` (Count Sketch on token embeddings), `LOW_RANK_GAUSSIAN` (low-rank factored SimHash, EGGROLL), or `SRHT` (Subsampled Randomized Hadamard Transform) |
 | `projection_dimension` | `None` | Target dim after Count Sketch; required for `AMS_SKETCH` |
 | `simhash_rank` | 1 | Rank *r* for `LOW_RANK_GAUSSIAN`; must satisfy `1 ≤ r < num_simhash_projections`. r=4 is a practical sweet spot for ColQwen2 (d=128, k≥8) |
 | `fill_empty_partitions` | `False` | Document side: fill empty slots via Hamming-nearest-neighbour |
@@ -205,46 +208,108 @@ Both preserve dot products in expectation: `E[⟨sketch(x), sketch(y)⟩] = ⟨x
 
 ---
 
-### Low-rank SimHash — faster partition assignment (EGGROLL)
+### SimHash projection modes
 
-Replaces the full `(d × k)` SimHash matrix with two smaller factors
-`A ∈ ℝ^{d×r}` and `B ∈ ℝ^{k×r}`, so the partition cost drops from
-`O(N × d × k)` to `O(N × d × r + N × r × k)`.
+Three SimHash projection modes are available, each trading speed against quality.
+All produce the **same FDE output shape** and are **drop-in replacements** for
+each other — only the SimHash matrix computation changes.
+
+#### Mode 1: `DEFAULT_IDENTITY` — full-rank Gaussian (baseline)
+
+Samples a fresh `(d × k)` Gaussian matrix per repetition. JL guarantee,
+full-rank quality. Baseline for comparison.
+
+```python
+enc = MUVERAEncoder(
+    dimension=128,
+    num_simhash_projections=8,
+    num_repetitions=4,
+)
+# SimHash cost: O(N × 128 × 8) = 1024N ops/rep
+```
+
+---
+
+#### Mode 2: `LOW_RANK_GAUSSIAN` — low-rank factored SimHash (EGGROLL)
+
+Factors `W ≈ AB⊤` where `A ∈ ℝ^{d×r}`, `B ∈ ℝ^{k×r}`, replacing one large
+matmul with two smaller ones:
 
 ```python
 from muvera_fde import ProjectionType
 
 enc = MUVERAEncoder(
     dimension=128,
-    num_simhash_projections=8,   # 2^8 = 256 partitions
+    num_simhash_projections=8,
     num_repetitions=4,
     projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
-    simhash_rank=4,              # r=4; cost: O(N×128×4 + N×4×8) = O(544N) vs O(1024N)
+    simhash_rank=4,   # r=4: O(N×128×4 + N×4×8) = 544N ops — 1.9× faster
     seed=42,
 )
-# fde_dimension = 4 × 256 × 128 = 131072 (same formula as DEFAULT_IDENTITY)
-
-q_fde = enc.encode_query(query_tokens)
-d_fde = enc.encode_document(doc_tokens)
-score = float(q_fde @ d_fde)
 ```
 
-**Convergence guarantee** (EGGROLL, Sarkar et al. 2025, Theorem 4): the
-low-rank sign pattern converges to the full-rank Gaussian sign pattern at
-rate **O(r⁻¹)** — faster than the standard CLT rate O(r⁻¹/²) because
-symmetry cancels all odd cumulants in the Edgeworth expansion.
+**Convergence** (EGGROLL, Sarkar et al. 2025, Theorem 4): O(r⁻¹) convergence
+to full-rank Gaussian — faster than the CLT rate O(r⁻¹/²) because symmetry
+cancels all odd cumulants in the Edgeworth expansion.
 
-Practical targets for ColQwen2 (d=128):
+| `simhash_rank` | Variance vs full-rank | Cost (k=8) | Speedup |
+|---|---|---|---|
+| 1 | ~100% baseline | 136N ops | 7.5× |
+| 4 | ~25% increase | 544N ops | 1.9× |
+| 8 | ~12% increase | 1088N ops | ~breakeven |
 
-| `simhash_rank` | Variance vs full-rank | SimHash cost vs full-rank (k=8) |
-|---|---|---|
-| 1 | ~100% baseline | 136N vs 1024N — 7.5× faster |
-| 4 | ~25% increase | 544N vs 1024N — 1.9× faster |
-| 8 | ~12% increase | 1088N vs 1024N — breakeven |
+> The 1/√r normalisation is omitted — SimHash sign assignments are
+> scale-invariant (`sign(αx) = sign(x)`), so it has no effect.
 
-> **Note:** Sign assignments are scale-invariant (`sign(αx) = sign(x)`), so the
-> 1/√r normalisation common in low-rank approximations is omitted — it has no
-> effect on partition assignments.
+---
+
+#### Mode 3: `SRHT` — Subsampled Randomized Hadamard Transform
+
+Applies the structured transform `S·H·D` row-wise:
+
+* **D** — random diagonal ±1 (Rademacher sign flip)
+* **H** — Walsh-Hadamard transform (O(d log d) butterfly)
+* **S** — random row subsampling to k dimensions
+
+Input is zero-padded to the next power of 2 ≥ d before applying H.
+
+```python
+enc = MUVERAEncoder(
+    dimension=128,
+    num_simhash_projections=8,
+    num_repetitions=4,
+    projection_type=ProjectionType.SRHT,
+    seed=42,
+)
+# SimHash cost: O(N × 128 × log₂(128) + N × 8) = O(N × 128 × 7 + N × 8) = 904N ops
+# No rank approximation error — full JL guarantee (Ailon & Chazelle, 2009)
+# Constraint: num_simhash_projections <= next_power_of_2(dimension)
+```
+
+**Theoretical guarantee**: SRHT is a full Johnson-Lindenstrauss projection —
+it preserves pairwise distances to ε with high probability, with no rank
+approximation error. Unlike LOW_RANK_GAUSSIAN, it converges exactly to
+full-rank Gaussian quality at `k = d`.
+
+---
+
+#### Three-way comparison for ColQwen2 (d=128)
+
+| Mode | SimHash cost (k=8) | vs baseline | Quality | Extra constraint |
+|---|---|---|---|---|
+| `DEFAULT_IDENTITY` | 1024N ops | 1× | Full-rank Gaussian baseline | None |
+| `LOW_RANK_GAUSSIAN` r=4 | 544N ops | **1.9×** | O(r⁻¹) convergence, ~25% variance ↑ | `1 ≤ r < k` |
+| `LOW_RANK_GAUSSIAN` r=1 | 136N ops | **7.5×** | ~100% variance baseline | `1 ≤ r < k` |
+| `SRHT` | 904N ops | 1.1× | Full JL, no rank error | `k ≤ next_pow2(d)` |
+
+**When to use each:**
+
+* **`DEFAULT_IDENTITY`** — default choice; correctness baseline, no constraints.
+* **`LOW_RANK_GAUSSIAN`** — when speed is the priority and mild quality loss is acceptable.
+  Use r=4 for ColQwen2. Becomes more attractive as k grows (cost scales as O(r) not O(k)).
+* **`SRHT`** — when you need full JL quality at sub-quadratic cost, or when k is large
+  (SRHT cost is O(d log d) regardless of k). Preferred for precision-critical workloads
+  like legal/tax document retrieval at WK where recall matters.
 
 ---
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from muvera_fde._internal.params import RepParams, build_rep_params
-from muvera_fde._internal.sketch import count_sketch, simhash_partition_indices
+from muvera_fde._internal.sketch import apply_srht, count_sketch, simhash_partition_indices
 from muvera_fde._internal.validation import (
     checked_intermediate_fde_length,
     prepare_embeddings,
@@ -34,22 +34,30 @@ def _project_and_partition(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Apply optional Count Sketch and SimHash partitioning for one repetition.
 
-    Supports three SimHash paths:
+    Four SimHash paths are supported:
 
-    * Full-rank (``simhash_mat`` set): ``sketch = projected @ W``
+    * **Full-rank Gaussian** (``simhash_mat`` set):
+      ``sketch = projected @ W``
       Cost: O(N x projection_dim x k).
-    * Low-rank (``simhash_a`` / ``simhash_b`` set): ``sketch = (projected @ A) @ B.T``
-      Cost: O(N x d x r + N x r x k).  Converges to full-rank at O(r^-1)
-      (EGGROLL Theorem 4).  Sign assignments are scale-invariant so no 1/sqrt(r)
-      normalisation is needed.
-    * No SimHash (both None): single partition, trivial aggregation.
+
+    * **Low-rank Gaussian** (``simhash_a`` / ``simhash_b`` set):
+      ``sketch = (projected @ A) @ B.T``
+      Cost: O(N x d x r + N x r x k).
+      Convergence: O(r^-1) to full-rank (EGGROLL Theorem 4).
+
+    * **SRHT** (``srht_d_signs`` / ``srht_sample_indices`` set):
+      ``sketch = S H D projected``  (pad -> D -> FWHT -> subsample)
+      Cost: O(N x d x log(d)).
+      Guarantee: full JL, no rank approximation.
+
+    * **No SimHash** (all None): single partition, trivial aggregation.
 
     Returns
     -------
-    projected : np.ndarray, shape (num_points, projection_dim)
-    partition_indices : np.ndarray, shape (num_points,), dtype int32
-    sketch_matrix : np.ndarray of shape (num_points, k) or None
-        Retained so callers can reuse it for nearest-neighbour fill.
+    projected : np.ndarray, shape (N, projection_dim)
+    partition_indices : np.ndarray, shape (N,), dtype int32
+    sketch_matrix : np.ndarray of shape (N, k) or None
+        Retained for nearest-neighbour empty-partition fill.
     """
     num_points = embedding_matrix.shape[0]
     if use_identity:
@@ -59,15 +67,25 @@ def _project_and_partition(
         projected = np.zeros((num_points, projection_dim), dtype=np.float32)
         np.add.at(projected.T, rep_params.cs_indices, (embedding_matrix * rep_params.cs_signs).T)
 
-    # --- SimHash projection: full-rank, low-rank, or disabled ---
+    # --- SimHash: four paths ---
+    sketch_matrix: np.ndarray | None
     if rep_params.simhash_mat is not None:
-        # Full-rank: O(N x projection_dim x k)
-        sketch_matrix: np.ndarray | None = projected @ rep_params.simhash_mat
+        # Full-rank Gaussian: O(N x d x k)
+        sketch_matrix = projected @ rep_params.simhash_mat
     elif rep_params.simhash_a is not None:
-        # Low-rank decomposed: O(N x d x r + N x r x k) -- two smaller matmuls.
-        # Scale-invariance of sign() means 1/sqrt(r) normalisation is a no-op.
+        # Low-rank decomposed: O(N x d x r + N x r x k)
         assert rep_params.simhash_b is not None
         sketch_matrix = (projected @ rep_params.simhash_a) @ rep_params.simhash_b.T
+    elif rep_params.srht_d_signs is not None:
+        # SRHT: pad -> D -> FWHT -> subsample -- O(N x d x log(d))
+        assert rep_params.srht_sample_indices is not None
+        assert rep_params.srht_padded_dim is not None
+        sketch_matrix = apply_srht(
+            projected,
+            rep_params.srht_d_signs,
+            rep_params.srht_sample_indices,
+            rep_params.srht_padded_dim,
+        )
     else:
         sketch_matrix = None
 
@@ -91,11 +109,7 @@ def _fill_empty_partitions(
     signs_rev: np.ndarray,
     k: int,
 ) -> None:
-    """Fill empty partition slots with the nearest token by SimHash Hamming distance.
-
-    Operates in batches to keep peak memory at O(batch x num_points x k).
-    When the point cloud is empty, ``rep_slice`` is left unchanged (all-zero).
-    """
+    """Fill empty partition slots with the nearest token by SimHash Hamming distance."""
     empty_binary = empty_pidxs.copy()
     empty_binary ^= empty_binary >> 1
     empty_binary ^= empty_binary >> 2
@@ -150,8 +164,13 @@ def _maybe_count_sketch(out: np.ndarray, config: FDEConfig) -> np.ndarray:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Config-derived helpers (shared with encoder.py)
+# ---------------------------------------------------------------------------
+
+
 def _projection_dim_for(config: FDEConfig) -> int:
-    """Return the per-partition slot width for the given config."""
+    """Per-partition slot width for the given config."""
     if config.projection_type == ProjectionType.AMS_SKETCH:
         assert config.projection_dimension is not None
         return config.projection_dimension
@@ -159,12 +178,16 @@ def _projection_dim_for(config: FDEConfig) -> int:
 
 
 def _use_identity(config: FDEConfig) -> bool:
-    """Return True when token embeddings are used without Count Sketch."""
+    """True when token embeddings bypass Count Sketch."""
     return config.projection_type != ProjectionType.AMS_SKETCH
 
 
 def _use_low_rank_simhash(config: FDEConfig) -> bool:
     return config.projection_type == ProjectionType.LOW_RANK_GAUSSIAN
+
+
+def _use_srht(config: FDEConfig) -> bool:
+    return config.projection_type == ProjectionType.SRHT
 
 
 # ---------------------------------------------------------------------------
@@ -179,31 +202,18 @@ def generate_query_fde(
 ) -> np.ndarray:
     """Generate a query-side Fixed Dimensional Encoding (SUM aggregation).
 
-    Each token's (optionally projected) embedding is **summed** into its
-    SimHash partition.  The resulting flat vector approximates Chamfer
-    Similarity when paired with a document FDE from :func:`generate_document_fde`
-    using the same ``config``.
-
     Parameters
     ----------
     point_cloud:
-        Query token embeddings, shape ``(num_tokens, dimension)`` or a flat
-        1-D array of length ``num_tokens * dimension``.
+        Query token embeddings, shape ``(num_tokens, dimension)`` or flat 1-D.
     config:
         Encoding configuration.  ``fill_empty_partitions`` must be ``False``.
     rep_params_list:
-        Precomputed per-repetition parameters (e.g. from
-        :attr:`~muvera_fde.encoder.MUVERAEncoder._rep_params`).  Built on the
-        fly when ``None``.
+        Precomputed per-repetition parameters.  Built on the fly when ``None``.
 
     Returns
     -------
     np.ndarray, shape ``(fde_dimension,)``, dtype float32
-
-    Raises
-    ------
-    ValueError
-        If ``config`` is invalid or ``config.fill_empty_partitions`` is ``True``.
     """
     validate_config(config)
     if config.fill_empty_partitions:
@@ -212,6 +222,7 @@ def generate_query_fde(
     embedding_matrix = prepare_embeddings(point_cloud, config)
     use_id = _use_identity(config)
     use_lr = _use_low_rank_simhash(config)
+    use_sh = _use_srht(config)
     projection_dim = _projection_dim_for(config)
 
     num_partitions = 1 << config.num_simhash_projections
@@ -229,6 +240,7 @@ def generate_query_fde(
                 use_id,
                 use_low_rank_simhash=use_lr,
                 simhash_rank=config.simhash_rank,
+                use_srht=use_sh,
             )
         )
         projected, partition_indices, _ = _project_and_partition(
@@ -250,16 +262,10 @@ def generate_document_fde(
 ) -> np.ndarray:
     """Generate a document-side Fixed Dimensional Encoding (AVERAGE aggregation).
 
-    Each SimHash partition slot is set to the **centroid** of all tokens that
-    fall into it.  When ``config.fill_empty_partitions`` is ``True``, empty
-    slots are filled with the nearest token's projection by SimHash Hamming
-    distance.
-
     Parameters
     ----------
     point_cloud:
-        Document token embeddings, shape ``(num_tokens, dimension)`` or a flat
-        1-D array of length ``num_tokens * dimension``.
+        Document token embeddings, shape ``(num_tokens, dimension)`` or flat 1-D.
     config:
         Encoding configuration.
     rep_params_list:
@@ -268,16 +274,12 @@ def generate_document_fde(
     Returns
     -------
     np.ndarray, shape ``(fde_dimension,)``, dtype float32
-
-    Raises
-    ------
-    ValueError
-        If ``config`` is invalid.
     """
     validate_config(config)
     embedding_matrix = prepare_embeddings(point_cloud, config)
     use_id = _use_identity(config)
     use_lr = _use_low_rank_simhash(config)
+    use_sh = _use_srht(config)
     projection_dim = _projection_dim_for(config)
 
     num_partitions = 1 << config.num_simhash_projections
@@ -295,6 +297,7 @@ def generate_document_fde(
                 use_id,
                 use_low_rank_simhash=use_lr,
                 simhash_rank=config.simhash_rank,
+                use_srht=use_sh,
             )
         )
         projected, partition_indices, sketch_matrix = _project_and_partition(

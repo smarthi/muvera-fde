@@ -9,14 +9,24 @@ from __future__ import annotations
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
-from muvera_fde._internal.sketch import low_rank_simhash_factors, simhash_matrix
+from muvera_fde._internal.sketch import (
+    low_rank_simhash_factors,
+    simhash_matrix,
+    srht_params,
+)
 
 
 class RepParams(BaseModel):
     """Precomputed random-projection parameters for one MUVERA repetition.
 
-    Built once at encoder initialisation and reused across every encode call,
-    eliminating repeated RNG sampling and matrix allocation in the hot loop.
+    Exactly one SimHash mode is active per repetition (when
+    ``num_simhash_projections > 0``):
+
+    * Full-rank Gaussian (``simhash_mat`` set): DEFAULT_IDENTITY / AMS_SKETCH
+    * Low-rank Gaussian (``simhash_a`` + ``simhash_b`` set): LOW_RANK_GAUSSIAN
+    * SRHT (``srht_d_signs`` + ``srht_sample_indices`` set): SRHT
+
+    All other SimHash fields are ``None`` for the inactive modes.
 
     Attributes
     ----------
@@ -27,22 +37,24 @@ class RepParams(BaseModel):
         Count Sketch +-1 sign for each input dimension, shape (dimension,), dtype float32.
         ``None`` when ``projection_type`` is not ``AMS_SKETCH``.
     simhash_mat:
-        Full-rank Gaussian SimHash projection matrix, shape (projection_dim, k), dtype float32.
-        Set for ``DEFAULT_IDENTITY`` and ``AMS_SKETCH``.
-        ``None`` when ``num_simhash_projections == 0`` or when using ``LOW_RANK_GAUSSIAN``.
+        Full-rank Gaussian SimHash matrix, shape (projection_dim, k), dtype float32.
+        Set for DEFAULT_IDENTITY and AMS_SKETCH (when num_simhash_projections > 0).
+        ``None`` for LOW_RANK_GAUSSIAN, SRHT, or when num_simhash_projections == 0.
     simhash_a:
         Low-rank SimHash factor A, shape (projection_dim, rank), dtype float32.
-        Set only when ``projection_type`` is ``LOW_RANK_GAUSSIAN`` and
-        ``num_simhash_projections > 0``.  ``None`` otherwise.
+        Set only for LOW_RANK_GAUSSIAN with num_simhash_projections > 0.
     simhash_b:
         Low-rank SimHash factor B, shape (num_simhash_projections, rank), dtype float32.
-        Set only when ``projection_type`` is ``LOW_RANK_GAUSSIAN`` and
-        ``num_simhash_projections > 0``.  ``None`` otherwise.
-
-    Notes
-    -----
-    Exactly one of ``simhash_mat`` or ``(simhash_a, simhash_b)`` is set (non-None)
-    per repetition when ``num_simhash_projections > 0``.
+        Set only for LOW_RANK_GAUSSIAN with num_simhash_projections > 0.
+    srht_d_signs:
+        Rademacher +-1 diagonal signs for SRHT, shape (padded_dim,), dtype float32.
+        Set only for SRHT with num_simhash_projections > 0.
+    srht_sample_indices:
+        Sorted indices of the k subsampled Hadamard rows, shape (k,), dtype int64.
+        Set only for SRHT with num_simhash_projections > 0.
+    srht_padded_dim:
+        Zero-padding target (next power of 2 >= projection_dim) for SRHT.
+        Set only for SRHT with num_simhash_projections > 0.
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -52,6 +64,9 @@ class RepParams(BaseModel):
     simhash_mat: np.ndarray | None
     simhash_a: np.ndarray | None = None
     simhash_b: np.ndarray | None = None
+    srht_d_signs: np.ndarray | None = None
+    srht_sample_indices: np.ndarray | None = None
+    srht_padded_dim: int | None = None
 
 
 def build_rep_params(
@@ -62,8 +77,15 @@ def build_rep_params(
     use_identity: bool,
     use_low_rank_simhash: bool = False,
     simhash_rank: int = 1,
+    use_srht: bool = False,
 ) -> RepParams:
-    """Precompute Count Sketch and SimHash parameters for one repetition.
+    """Precompute projection parameters for one repetition.
+
+    Exactly one SimHash variant is built when ``num_simhash_projections > 0``:
+
+    * ``use_srht=True``: SRHT params (d_signs, sample_indices, padded_dim)
+    * ``use_low_rank_simhash=True``: low-rank factors (A, B)
+    * otherwise: full-rank Gaussian matrix W
 
     Parameters
     ----------
@@ -72,25 +94,22 @@ def build_rep_params(
     dimension:
         Input embedding dimension.
     projection_dim:
-        Width of each partition slot (``dimension`` for identity projection,
-        ``config.projection_dimension`` for Count Sketch).
+        Width of each partition slot after optional Count Sketch.
     num_simhash_projections:
-        Number of SimHash bits *k*; 0 disables SimHash (single partition).
+        Number of SimHash bits *k*; 0 disables all SimHash.
     use_identity:
-        When ``True`` the Count Sketch fields (cs_indices, cs_signs) are
-        left as ``None``.
+        When ``True``, Count Sketch fields are left as ``None``.
     use_low_rank_simhash:
-        When ``True``, build low-rank SimHash factors (A, B) instead of the
-        full (projection_dim x k) matrix.  Requires ``num_simhash_projections > 0``
-        and ``simhash_rank >= 1``.
+        When ``True``, build LOW_RANK_GAUSSIAN factors instead of full matrix.
     simhash_rank:
-        Rank *r* for the low-rank SimHash factorisation.  Only used when
-        ``use_low_rank_simhash=True``.
+        Rank *r* for LOW_RANK_GAUSSIAN.  Ignored otherwise.
+    use_srht:
+        When ``True``, build SRHT params instead of full matrix.
+        Takes precedence over ``use_low_rank_simhash`` if both are set.
 
     Returns
     -------
     RepParams
-        Immutable container of precomputed projection parameters.
     """
     cs_indices = cs_signs = None
     if not use_identity:
@@ -99,11 +118,16 @@ def build_rep_params(
         cs_signs = 2.0 * rng.integers(0, 2, size=dimension).astype(np.float32) - 1.0
 
     simhash_mat = None
-    simhash_a = None
-    simhash_b = None
+    simhash_a = simhash_b = None
+    srht_d_signs = srht_sample_indices = None
+    srht_padded_dim = None
 
     if num_simhash_projections > 0:
-        if use_low_rank_simhash:
+        if use_srht:
+            srht_d_signs, srht_sample_indices, srht_padded_dim = srht_params(
+                rep_seed, projection_dim, num_simhash_projections
+            )
+        elif use_low_rank_simhash:
             simhash_a, simhash_b = low_rank_simhash_factors(
                 rep_seed, projection_dim, num_simhash_projections, simhash_rank
             )
@@ -116,4 +140,7 @@ def build_rep_params(
         simhash_mat=simhash_mat,
         simhash_a=simhash_a,
         simhash_b=simhash_b,
+        srht_d_signs=srht_d_signs,
+        srht_sample_indices=srht_sample_indices,
+        srht_padded_dim=srht_padded_dim,
     )
