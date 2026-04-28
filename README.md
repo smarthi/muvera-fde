@@ -11,11 +11,12 @@ A pure-Python port of Google's graph-mining MUVERA implementation, extended with
 **low-rank SimHash factorisation** (EGGROLL, Sarkar et al., 2025) and
 **Subsampled Randomized Hadamard Transform** (SRHT, Woolfe, Liberty, Rokhlin & Tygert, 2008) SimHash modes.
 
-| | Reference |
-|---|---|
-| MUVERA paper | [Dhulipala et al., 2024](https://arxiv.org/abs/2405.19504) |
-| EGGROLL paper | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf) |
-| Original C++ implementation | [google/graph-mining](https://github.com/google/graph-mining/tree/main/sketching/point_cloud) |
+|                                       | Reference                                                                                     |
+|---------------------------------------|-----------------------------------------------------------------------------------------------|
+| MUVERA paper                          | [Dhulipala et al., 2024](https://arxiv.org/abs/2405.19504)                                    |
+| EGGROLL paper                         | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf)                          |
+| Johnson-Lindenstrauss Transform paper | [Ailon et al., 2006](https://www.cs.princeton.edu/~chazelle/pubs/FJLT-sicomp09.pdf)           |
+| Original C++ implementation           | [google/graph-mining](https://github.com/google/graph-mining/tree/main/sketching/point_cloud) |
 
 ---
 
@@ -309,6 +310,11 @@ enc = MUVERAEncoder(
 it preserves pairwise distances to ε with high probability, with no rank
 approximation error. Unlike LOW_RANK_GAUSSIAN, it converges exactly to
 full-rank Gaussian quality at `k = d`.
+Tropp (2011) provides the tightest known analysis, proving that
+`ℓ ≥ (1+ι) · k log(k)` subsampled dimensions suffice to preserve an entire
+k-dimensional subspace with optimal constants via matrix Chernoff inequalities.
+For SimHash (sign-only) use, this subspace result is sufficient but not tight —
+sign assignments are scale-invariant so the embedding constants do not apply directly.
 
 ---
 
@@ -399,6 +405,217 @@ with open("fde_config.json") as f:
 
 assert config == config2
 ```
+
+---
+
+---
+
+## Configuration guide
+
+Most users hit poor results not because of a wrong projection type but because of a
+misconfigured `num_simhash_projections` / `num_repetitions` / `simhash_rank` combination.
+This section explains every tradeoff in plain terms, with concrete numbers for ColQwen2
+(128-dim) and ColQwen3.5 (320-dim) — the two most common production models.
+
+---
+
+### Know your embedding dimension first
+
+Different models produce different per-token embedding dimensions. Set `dimension` to
+match your model exactly — this is the single most important parameter.
+
+| Model | `dimension` | Notes |
+|---|---|---|
+| ColBERT v2 | 128 | Original late-interaction baseline |
+| ColQwen2 | 128 | Most widely deployed as of 2025 |
+| ColQwen3.5 v1 | 128 | Early checkpoint |
+| ColQwen3.5 v3 | 320 | Current recommended checkpoint |
+| Ops-ColQwen3-4B | 320 | OpenSearch variant, up to 2560 via extended head |
+
+> **Common mistake:** Using `dimension=128` with ColQwen3.5 v3 (which is 320-dim) silently
+> truncates every token embedding to 128 dims, discarding 60% of the representation before
+> MUVERA even runs. Always verify with `model.config.projection_dim` or check the model card.
+
+---
+
+### The two knobs that matter most
+
+#### `num_simhash_projections` (k) — partition granularity
+
+Each repetition divides embedding space into **2^k buckets**. Tokens that land in the
+same bucket get averaged together into one FDE slot.
+
+| k | Partitions | Tokens/partition (512-token doc) | Recommendation |
+|---|---|---|---|
+| 4 | 16 | 32 | coarse; fast but high collision rate |
+| 6 | 64 | 8 | reasonable default |
+| 8 | 256 | 2 | good quality; use `fill_empty_partitions=True` |
+| 10 | 1,024 | 0.5 | too sparse for most docs; many empty slots |
+
+> **Rule of thumb:** aim for **4–10 tokens per partition** on average.
+> For a 512-token ColQwen3.5 page: k=6 (8 tokens/partition) or k=8 with fill enabled.
+
+#### `num_repetitions` — approximation quality
+
+Each repetition is an independent random partition of the same embedding space. More
+repetitions directly improves recall and is the safest quality knob to increase.
+
+- More repetitions **always** improves recall.
+- Cost scales linearly: 2× repetitions = 2× FDE size = 2× encode time.
+- Diminishing returns set in around 8–16 repetitions for most corpora.
+
+> **Rule of thumb:** start with `num_repetitions=8`. If recall is poor, double it before
+> touching any other parameter.
+
+---
+
+### The budget equation
+
+```
+fde_dimension = num_repetitions × 2^k × dimension
+```
+
+For a fixed FDE budget, spending it on **more repetitions beats larger k** for most corpora:
+
+| Config | fde_dimension (ColQwen3.5, d=320) | Notes |
+|---|---|---|
+| k=6, reps=20 | 20 × 64 × 320 = 409,600 | many repetitions, coarse partitions |
+| k=8, reps=10 | 10 × 256 × 320 = 819,200 | balanced — usually better recall |
+| k=8, reps=5 | 5 × 256 × 320 = 409,600 | same budget as first row; better quality |
+
+Use `final_projection_dimension` to compress to a target index size after choosing
+the right k/repetitions balance:
+
+```python
+enc = MUVERAEncoder(
+    dimension=320,               # ColQwen3.5 v3
+    num_simhash_projections=8,
+    num_repetitions=10,
+    fill_empty_partitions=True,
+    final_projection_dimension=81920,  # compress to target index size
+)
+```
+
+---
+
+### When to use `fill_empty_partitions`
+
+With k=8 (256 partitions) and a short document (< 200 tokens), many partition slots
+will be empty — all zeros in the FDE. Zeros contribute nothing to the dot product and
+directly hurt recall.
+
+Enable `fill_empty_partitions=True` whenever:
+
+```
+num_doc_tokens / 2^k < 2
+```
+
+| k | Enable fill if doc tokens < |
+|---|---|
+| 6 | 128 |
+| 8 | 512 |
+| 10 | 2,048 |
+
+For ColQwen3.5 pages at k=8: nearly always enable fill, since most document pages
+produce fewer than 512 tokens.
+
+---
+
+### `LOW_RANK_GAUSSIAN` — when it helps and when it does not
+
+Low-rank SimHash only makes theoretical sense when **r is much smaller than k**.
+The computational benefit comes from the ratio r/k — if that ratio is close to 1,
+you get all the approximation error with almost no speed gain.
+
+| k | r | r/k ratio | Assessment |
+|---|---|---|---|
+| 6 | 4 | 0.67 | ❌ nearly full-rank — avoid |
+| 8 | 4 | 0.50 | ⚠️ marginal benefit |
+| 16 | 4 | 0.25 | ✅ good tradeoff (~1.9× faster, ~25% variance ↑) |
+| 16 | 2 | 0.13 | ✅ aggressive (~4× faster, ~50% variance ↑) |
+
+> **The k=6, rank=4 trap:** this is a near-full-rank approximation of a 6-bit matrix.
+> You pay ~25% variance penalty with only a 1.4× compute saving. This combination
+> produces the worst results of all modes (as seen in early ColQwen3.5 benchmarks).
+> **Minimum recommended config for LOW_RANK_GAUSSIAN: k ≥ 16, rank ≤ k//4.**
+
+---
+
+### Recommended starting configs
+
+#### ColQwen2 (d=128) — general purpose
+
+```python
+enc = MUVERAEncoder(
+    dimension=128,
+    num_simhash_projections=8,
+    num_repetitions=8,
+    fill_empty_partitions=True,
+    seed=42,
+)
+# fde_dimension = 8 × 256 × 128 = 262,144
+# tokens/partition at 512 tokens: 2 — fill is essential
+```
+
+#### ColQwen3.5 v3 (d=320) — general purpose
+
+```python
+enc = MUVERAEncoder(
+    dimension=320,
+    num_simhash_projections=8,
+    num_repetitions=8,
+    fill_empty_partitions=True,
+    seed=42,
+)
+# fde_dimension = 8 × 256 × 320 = 655,360
+# use final_projection_dimension if index size is a constraint
+```
+
+#### ColQwen3.5 v3 — speed-optimized (SRHT)
+
+```python
+enc = MUVERAEncoder(
+    dimension=320,
+    num_simhash_projections=8,
+    num_repetitions=8,
+    projection_type=ProjectionType.SRHT,
+    fill_empty_partitions=True,
+    seed=42,
+)
+# Full JL guarantee, ~12% faster SimHash than DEFAULT_IDENTITY at k=8
+# Best quality/speed tradeoff in benchmarks
+```
+
+#### ColQwen3.5 v3 — low-rank (correctly configured)
+
+```python
+enc = MUVERAEncoder(
+    dimension=320,
+    num_simhash_projections=16,   # k must be large for low-rank to help
+    num_repetitions=4,
+    projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+    simhash_rank=4,               # r/k = 4/16 = 0.25 — meaningful low-rank
+    fill_empty_partitions=True,
+    seed=42,
+)
+# fde_dimension = 4 × 65536 × 320 = 83,886,080 — use final_projection_dimension
+```
+
+---
+
+### Quality vs. exact MaxSim — setting realistic expectations
+
+MUVERA FDE retrieval is a **first-stage filter**, not a replacement for exact MaxSim.
+Typical recall gaps on a 512-token ColQwen3.5 corpus:
+
+| Stage | R@1 (typical) | Retrieval time |
+|---|---|---|
+| Exact MaxSim (multi-vector) | ~0.88 | slow, scales with corpus size |
+| MUVERA FDE + ANN (first stage) | ~0.63 | fast, sub-linear |
+| MUVERA FDE → MaxSim rerank top-100 | ~0.86 | fast + small rerank overhead |
+
+The ~25 point R@1 gap between exact and FDE-only is normal and expected. Always pair
+pymuvera with a MaxSim reranking step on the ANN shortlist for production use.
 
 ---
 
