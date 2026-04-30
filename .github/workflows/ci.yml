@@ -42,10 +42,10 @@ jobs:
         run: uv run ruff format --check src tests
 
       - name: Mypy type check
-        run: uv run mypy src/muvera_fde
+        run: uv run mypy src/pymuvera
 
       - name: Pytest + coverage
-        run: uv run pytest --cov=src/muvera_fde --cov-report=term-missing
+        run: uv run pytest --cov=src/pymuvera --cov-report=term-missing
 
   publish:
     name: Publish to PyPI

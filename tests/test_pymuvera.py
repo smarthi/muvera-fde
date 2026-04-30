@@ -21,14 +21,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from muvera_fde import (
+from pymuvera import (
     FDEConfig,
     MUVERAEncoder,
     ProjectionType,
     generate_document_fde,
     generate_query_fde,
 )
-from muvera_fde._internal.validation import validate_config
+from pymuvera._internal.validation import validate_config
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -656,7 +656,7 @@ class TestSRHTProjection:
 
     def test_fwht_correctness(self) -> None:
         """Verify the butterfly FWHT against a known 4-element transform."""
-        from muvera_fde._internal.sketch import _fwht_batch
+        from pymuvera._internal.sketch import _fwht_batch
 
         x = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
         result = _fwht_batch(x)
@@ -667,3 +667,282 @@ class TestSRHTProjection:
         result2 = _fwht_batch(x2)
         # H @ [1,-1,1,-1] = [0, 4, 0, 0] in Hadamard-ordered butterfly
         np.testing.assert_allclose(result2, [[0.0, 4.0, 0.0, 0.0]], atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Cross-Polytope LSH
+# ---------------------------------------------------------------------------
+
+
+class TestCrossPolytopeProjection:
+    """Tests for Cross-Polytope LSH (argmax-based, theoretically optimal cosine partitioning)."""
+
+    def _cp_enc(self, reps: int = 2, fill: bool = False) -> MUVERAEncoder:
+        return MUVERAEncoder(
+            dimension=DIM,
+            num_repetitions=reps,
+            projection_type=ProjectionType.CROSS_POLYTOPE,
+            fill_empty_partitions=fill,
+            seed=55,
+        )
+
+    def test_output_shape(self, rng: np.random.Generator) -> None:
+        enc = self._cp_enc()
+        cloud = rng.standard_normal((50, DIM)).astype(np.float32)
+        # num_partitions = 2 * next_power_of_2(DIM=32) = 2*32 = 64
+        # fde_dimension = 2 reps * 64 partitions * 32 dims = 4096
+        expected = 2 * 64 * DIM
+        assert enc.fde_dimension == expected
+        assert enc.encode_query(cloud).shape == (expected,)
+        assert enc.encode_document(cloud).shape == (expected,)
+
+    def test_dtype(self, rng: np.random.Generator) -> None:
+        enc = self._cp_enc()
+        cloud = rng.standard_normal((30, DIM)).astype(np.float32)
+        assert enc.encode_query(cloud).dtype == np.float32
+        assert enc.encode_document(cloud).dtype == np.float32
+
+    def test_deterministic(self, rng: np.random.Generator) -> None:
+        enc = self._cp_enc()
+        cloud = rng.standard_normal((30, DIM)).astype(np.float32)
+        np.testing.assert_array_equal(enc.encode_query(cloud), enc.encode_query(cloud))
+        np.testing.assert_array_equal(enc.encode_document(cloud), enc.encode_document(cloud))
+
+    def test_different_seeds_differ(self, rng: np.random.Generator) -> None:
+        cloud = rng.standard_normal((40, DIM)).astype(np.float32)
+        enc1 = MUVERAEncoder(dimension=DIM, projection_type=ProjectionType.CROSS_POLYTOPE, seed=1)
+        enc2 = MUVERAEncoder(dimension=DIM, projection_type=ProjectionType.CROSS_POLYTOPE, seed=2)
+        assert not np.array_equal(enc1.encode_query(cloud), enc2.encode_query(cloud))
+
+    def test_num_simhash_projections_ignored(self, rng: np.random.Generator) -> None:
+        """num_simhash_projections has no effect for CROSS_POLYTOPE."""
+        cloud = rng.standard_normal((40, DIM)).astype(np.float32)
+        enc_k4 = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            projection_type=ProjectionType.CROSS_POLYTOPE,
+            seed=1,
+        )
+        enc_k8 = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=8,
+            projection_type=ProjectionType.CROSS_POLYTOPE,
+            seed=1,
+        )
+        # Same seed -> same rotation -> same partitions regardless of k
+        assert enc_k4.fde_dimension == enc_k8.fde_dimension
+        np.testing.assert_array_equal(enc_k4.encode_query(cloud), enc_k8.encode_query(cloud))
+
+    def test_partition_indices_in_range(self, rng: np.random.Generator) -> None:
+        """All partition indices must be in [0, 2*padded_dim)."""
+        from pymuvera._internal.sketch import _next_power_of_2, apply_cross_polytope
+
+        cloud = rng.standard_normal((100, DIM)).astype(np.float32)
+        padded_dim = _next_power_of_2(DIM)
+        num_partitions = 2 * padded_dim
+
+        # Build params and check indices directly
+        from pymuvera._internal.sketch import cross_polytope_params
+
+        d_signs, pd = cross_polytope_params(seed=0, dimension=DIM)
+        indices = apply_cross_polytope(cloud, d_signs, pd)
+        assert indices.min() >= 0
+        assert indices.max() < num_partitions
+
+    def test_approximates_chamfer(self, rng: np.random.Generator) -> None:
+        """Cross-Polytope FDE should rank similar docs above random docs."""
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_repetitions=6,
+            projection_type=ProjectionType.CROSS_POLYTOPE,
+            seed=0,
+        )
+        base = rng.standard_normal((40, DIM)).astype(np.float32)
+        similar = base + 0.1 * rng.standard_normal((40, DIM)).astype(np.float32)
+        random = rng.standard_normal((40, DIM)).astype(np.float32)
+        q_fde = enc.encode_query(base)
+        assert float(q_fde @ enc.encode_document(similar)) > float(
+            q_fde @ enc.encode_document(random)
+        )
+
+    def test_positive_score_same_cloud(self, rng: np.random.Generator) -> None:
+        enc = self._cp_enc(reps=4)
+        cloud = rng.standard_normal((50, DIM)).astype(np.float32)
+        assert float(enc.encode_query(cloud) @ enc.encode_document(cloud)) > 0
+
+    def test_fill_uses_densifying_automatically(self, rng: np.random.Generator) -> None:
+        """CROSS_POLYTOPE + fill_empty_partitions uses densifying fill, not Hamming."""
+        enc = self._cp_enc(reps=2, fill=True)
+        # sparse doc: 2 tokens, 64 partitions -> many empty
+        cloud = rng.standard_normal((2, DIM)).astype(np.float32)
+        fde = enc.encode_document(cloud)
+        # With fill, most slots should be non-zero
+        norms = np.linalg.norm(fde.reshape(-1, DIM), axis=1)
+        assert (norms == 0).sum() == 0, "densifying fill should leave no zero slots"
+
+    def test_batch_shapes(self, rng: np.random.Generator) -> None:
+        enc = self._cp_enc()
+        qs = [rng.standard_normal((20, DIM)).astype(np.float32) for _ in range(3)]
+        ds = [rng.standard_normal((80, DIM)).astype(np.float32) for _ in range(5)]
+        assert enc.encode_queries_batch(qs).shape == (3, enc.fde_dimension)
+        assert enc.encode_documents_batch(ds).shape == (5, enc.fde_dimension)
+
+    def test_fde_dimension_formula(self) -> None:
+        """fde_dimension = num_repetitions * 2*padded_dim * dimension."""
+        from pymuvera._internal.sketch import _next_power_of_2
+
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_repetitions=3,
+            projection_type=ProjectionType.CROSS_POLYTOPE,
+        )
+        padded = _next_power_of_2(DIM)
+        assert enc.fde_dimension == 3 * 2 * padded * DIM
+
+    def test_non_power_of_2_dimension(self, rng: np.random.Generator) -> None:
+        """d=24 pads to 32; num_partitions=64."""
+        enc = MUVERAEncoder(
+            dimension=24,
+            num_repetitions=2,
+            projection_type=ProjectionType.CROSS_POLYTOPE,
+        )
+        cloud = rng.standard_normal((30, 24)).astype(np.float32)
+        assert enc.fde_dimension == 2 * 64 * 24
+        assert enc.encode_query(cloud).shape == (enc.fde_dimension,)
+
+    def test_repr_shows_cross_polytope(self) -> None:
+        enc = self._cp_enc()
+        assert "CROSS_POLYTOPE" in repr(enc)
+
+
+# ---------------------------------------------------------------------------
+# Densifying LSH fill
+# ---------------------------------------------------------------------------
+
+
+class TestDensifyingFill:
+    """Tests for Densifying LSH empty-partition fill (Shrivastava, 2014)."""
+
+    def test_densifying_fills_all_empty_slots(self, rng: np.random.Generator) -> None:
+        """With densifying fill, no partition slots should remain zero."""
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            num_repetitions=2,
+            fill_empty_partitions=True,
+            densifying_fill=True,
+            seed=0,
+        )
+        # 2 tokens, 16 partitions -> most empty
+        cloud = rng.standard_normal((2, DIM)).astype(np.float32)
+        fde = enc.encode_document(cloud)
+        norms = np.linalg.norm(fde.reshape(-1, DIM), axis=1)
+        assert (norms == 0).sum() == 0
+
+    def test_densifying_faster_path_same_shape(self, rng: np.random.Generator) -> None:
+        """Densifying and Hamming fill produce same output shape."""
+        cloud = rng.standard_normal((50, DIM)).astype(np.float32)
+        hamming_enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=3,
+            num_repetitions=2,
+            fill_empty_partitions=True,
+            densifying_fill=False,
+            seed=0,
+        )
+        densify_enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=3,
+            num_repetitions=2,
+            fill_empty_partitions=True,
+            densifying_fill=True,
+            seed=0,
+        )
+        assert hamming_enc.fde_dimension == densify_enc.fde_dimension
+        h_fde = hamming_enc.encode_document(cloud)
+        d_fde = densify_enc.encode_document(cloud)
+        assert h_fde.shape == d_fde.shape
+
+    def test_densifying_deterministic(self, rng: np.random.Generator) -> None:
+        """Same seed -> same densifying fill output."""
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            fill_empty_partitions=True,
+            densifying_fill=True,
+            seed=7,
+        )
+        cloud = rng.standard_normal((3, DIM)).astype(np.float32)
+        a = enc.encode_document(cloud)
+        b = enc.encode_document(cloud)
+        np.testing.assert_array_equal(a, b)
+
+    def test_densifying_repr(self) -> None:
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            fill_empty_partitions=True,
+            densifying_fill=True,
+        )
+        assert "densifying_fill=True" in repr(enc)
+
+    def test_densifying_no_fill_flag_no_effect(self, rng: np.random.Generator) -> None:
+        """densifying_fill=True without fill_empty_partitions=True has no effect."""
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            fill_empty_partitions=False,  # fill disabled
+            densifying_fill=True,
+            seed=0,
+        )
+        cloud = rng.standard_normal((2, DIM)).astype(np.float32)
+        fde = enc.encode_document(cloud)
+        # Without fill, empty slots should remain zero
+        norms = np.linalg.norm(fde.reshape(-1, DIM), axis=1)
+        assert (norms == 0).sum() > 0
+
+    def test_densifying_with_srht(self, rng: np.random.Generator) -> None:
+        """Densifying fill works with SRHT projection."""
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=4,
+            num_repetitions=2,
+            projection_type=ProjectionType.SRHT,
+            fill_empty_partitions=True,
+            densifying_fill=True,
+            seed=0,
+        )
+        cloud = rng.standard_normal((2, DIM)).astype(np.float32)
+        fde = enc.encode_document(cloud)
+        norms = np.linalg.norm(fde.reshape(-1, DIM), axis=1)
+        assert (norms == 0).sum() == 0
+
+    def test_densifying_with_low_rank(self, rng: np.random.Generator) -> None:
+        """Densifying fill works with LOW_RANK_GAUSSIAN projection."""
+        enc = MUVERAEncoder(
+            dimension=DIM,
+            num_simhash_projections=5,
+            num_repetitions=2,
+            projection_type=ProjectionType.LOW_RANK_GAUSSIAN,
+            simhash_rank=2,
+            fill_empty_partitions=True,
+            densifying_fill=True,
+            seed=0,
+        )
+        cloud = rng.standard_normal((2, DIM)).astype(np.float32)
+        fde = enc.encode_document(cloud)
+        norms = np.linalg.norm(fde.reshape(-1, DIM), axis=1)
+        assert (norms == 0).sum() == 0
+
+    def test_densifying_direct_api(self, rng: np.random.Generator) -> None:
+        """Test densifying_fill function directly."""
+        from pymuvera._internal.sketch import densifying_fill as df
+
+        rep_slice = np.zeros((16, DIM), dtype=np.float32)
+        projected = rng.standard_normal((5, DIM)).astype(np.float32)
+        empty_pidxs = np.array([0, 2, 4, 6, 8, 10, 12, 14], dtype=np.int32)
+
+        df(rep_slice, projected, empty_pidxs, rep_seed=42)
+
+        # All previously-empty slots should now be non-zero
+        for p in empty_pidxs:
+            assert np.linalg.norm(rep_slice[p]) > 0
