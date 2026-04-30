@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from muvera_fde._internal.sketch import (
+from pymuvera._internal.sketch import (
     MAX_SIMHASH_PROJECTIONS,
     MAX_SIMHASH_PROJECTIONS_WITH_FILL,
     _next_power_of_2,
 )
-from muvera_fde.config import FDEConfig, ProjectionType
+from pymuvera.config import FDEConfig, ProjectionType
 
 _MAX_INTERMEDIATE_FDE_BYTES: int = 1 << 30  # 1 GiB
 

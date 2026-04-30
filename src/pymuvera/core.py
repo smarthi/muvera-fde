@@ -6,22 +6,22 @@ from __future__ import annotations
 
 import numpy as np
 
-from muvera_fde._internal.params import RepParams, build_rep_params
-from muvera_fde._internal.sketch import (
+from pymuvera._internal.params import RepParams, build_rep_params
+from pymuvera._internal.sketch import (
     apply_cross_polytope,
     apply_srht,
     count_sketch,
     densifying_fill,
     simhash_partition_indices,
 )
-from muvera_fde._internal.validation import (
+from pymuvera._internal.validation import (
     _projection_dim_for_config,
     checked_intermediate_fde_length,
     num_partitions_for_config,
     prepare_embeddings,
     validate_config,
 )
-from muvera_fde.config import FDEConfig, ProjectionType
+from pymuvera.config import FDEConfig, ProjectionType
 
 # ---------------------------------------------------------------------------
 # Config-derived helpers (shared with encoder.py)

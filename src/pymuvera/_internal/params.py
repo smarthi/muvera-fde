@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
-from muvera_fde._internal.sketch import (
+from pymuvera._internal.sketch import (
     cross_polytope_params,
     low_rank_simhash_factors,
     simhash_matrix,

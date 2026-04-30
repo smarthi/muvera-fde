@@ -6,15 +6,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from muvera_fde._internal.params import RepParams, build_rep_params
-from muvera_fde._internal.validation import (
+from pymuvera._internal.params import RepParams, build_rep_params
+from pymuvera._internal.validation import (
     _projection_dim_for_config,
     checked_intermediate_fde_length,
     num_partitions_for_config,
     validate_config,
 )
-from muvera_fde.config import FDEConfig, ProjectionType
-from muvera_fde.core import (
+from pymuvera.config import FDEConfig, ProjectionType
+from pymuvera.core import (
     _use_cross_polytope,
     _use_identity,
     _use_low_rank_simhash,

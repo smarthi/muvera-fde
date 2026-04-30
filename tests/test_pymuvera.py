@@ -21,14 +21,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from muvera_fde import (
+from pymuvera import (
     FDEConfig,
     MUVERAEncoder,
     ProjectionType,
     generate_document_fde,
     generate_query_fde,
 )
-from muvera_fde._internal.validation import validate_config
+from pymuvera._internal.validation import validate_config
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -656,7 +656,7 @@ class TestSRHTProjection:
 
     def test_fwht_correctness(self) -> None:
         """Verify the butterfly FWHT against a known 4-element transform."""
-        from muvera_fde._internal.sketch import _fwht_batch
+        from pymuvera._internal.sketch import _fwht_batch
 
         x = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
         result = _fwht_batch(x)
@@ -735,14 +735,14 @@ class TestCrossPolytopeProjection:
 
     def test_partition_indices_in_range(self, rng: np.random.Generator) -> None:
         """All partition indices must be in [0, 2*padded_dim)."""
-        from muvera_fde._internal.sketch import _next_power_of_2, apply_cross_polytope
+        from pymuvera._internal.sketch import _next_power_of_2, apply_cross_polytope
 
         cloud = rng.standard_normal((100, DIM)).astype(np.float32)
         padded_dim = _next_power_of_2(DIM)
         num_partitions = 2 * padded_dim
 
         # Build params and check indices directly
-        from muvera_fde._internal.sketch import cross_polytope_params
+        from pymuvera._internal.sketch import cross_polytope_params
 
         d_signs, pd = cross_polytope_params(seed=0, dimension=DIM)
         indices = apply_cross_polytope(cloud, d_signs, pd)
@@ -789,7 +789,7 @@ class TestCrossPolytopeProjection:
 
     def test_fde_dimension_formula(self) -> None:
         """fde_dimension = num_repetitions * 2*padded_dim * dimension."""
-        from muvera_fde._internal.sketch import _next_power_of_2
+        from pymuvera._internal.sketch import _next_power_of_2
 
         enc = MUVERAEncoder(
             dimension=DIM,
@@ -935,7 +935,7 @@ class TestDensifyingFill:
 
     def test_densifying_direct_api(self, rng: np.random.Generator) -> None:
         """Test densifying_fill function directly."""
-        from muvera_fde._internal.sketch import densifying_fill as df
+        from pymuvera._internal.sketch import densifying_fill as df
 
         rep_slice = np.zeros((16, DIM), dtype=np.float32)
         projected = rng.standard_normal((5, DIM)).astype(np.float32)
