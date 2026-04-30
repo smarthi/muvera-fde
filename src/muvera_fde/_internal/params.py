@@ -10,6 +10,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from muvera_fde._internal.sketch import (
+    cross_polytope_params,
     low_rank_simhash_factors,
     simhash_matrix,
     srht_params,
@@ -19,42 +20,14 @@ from muvera_fde._internal.sketch import (
 class RepParams(BaseModel):
     """Precomputed random-projection parameters for one MUVERA repetition.
 
-    Exactly one SimHash mode is active per repetition (when
-    ``num_simhash_projections > 0``):
+    Exactly one SimHash mode is active per repetition:
 
-    * Full-rank Gaussian (``simhash_mat`` set): DEFAULT_IDENTITY / AMS_SKETCH
-    * Low-rank Gaussian (``simhash_a`` + ``simhash_b`` set): LOW_RANK_GAUSSIAN
-    * SRHT (``srht_d_signs`` + ``srht_sample_indices`` set): SRHT
+    * Full-rank Gaussian  (simhash_mat set):              DEFAULT_IDENTITY / AMS_SKETCH
+    * Low-rank Gaussian   (simhash_a + simhash_b set):    LOW_RANK_GAUSSIAN
+    * SRHT                (srht_d_signs + indices set):   SRHT
+    * Cross-Polytope      (cp_d_signs set):               CROSS_POLYTOPE
 
-    All other SimHash fields are ``None`` for the inactive modes.
-
-    Attributes
-    ----------
-    cs_indices:
-        Count Sketch bucket index for each input dimension, shape (dimension,).
-        ``None`` when ``projection_type`` is not ``AMS_SKETCH``.
-    cs_signs:
-        Count Sketch +-1 sign for each input dimension, shape (dimension,), dtype float32.
-        ``None`` when ``projection_type`` is not ``AMS_SKETCH``.
-    simhash_mat:
-        Full-rank Gaussian SimHash matrix, shape (projection_dim, k), dtype float32.
-        Set for DEFAULT_IDENTITY and AMS_SKETCH (when num_simhash_projections > 0).
-        ``None`` for LOW_RANK_GAUSSIAN, SRHT, or when num_simhash_projections == 0.
-    simhash_a:
-        Low-rank SimHash factor A, shape (projection_dim, rank), dtype float32.
-        Set only for LOW_RANK_GAUSSIAN with num_simhash_projections > 0.
-    simhash_b:
-        Low-rank SimHash factor B, shape (num_simhash_projections, rank), dtype float32.
-        Set only for LOW_RANK_GAUSSIAN with num_simhash_projections > 0.
-    srht_d_signs:
-        Rademacher +-1 diagonal signs for SRHT, shape (padded_dim,), dtype float32.
-        Set only for SRHT with num_simhash_projections > 0.
-    srht_sample_indices:
-        Sorted indices of the k subsampled Hadamard rows, shape (k,), dtype int64.
-        Set only for SRHT with num_simhash_projections > 0.
-    srht_padded_dim:
-        Zero-padding target (next power of 2 >= projection_dim) for SRHT.
-        Set only for SRHT with num_simhash_projections > 0.
+    All other SimHash fields are None for the inactive modes.
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -67,6 +40,9 @@ class RepParams(BaseModel):
     srht_d_signs: np.ndarray | None = None
     srht_sample_indices: np.ndarray | None = None
     srht_padded_dim: int | None = None
+    # Cross-Polytope fields
+    cp_d_signs: np.ndarray | None = None
+    cp_padded_dim: int | None = None
 
 
 def build_rep_params(
@@ -78,38 +54,24 @@ def build_rep_params(
     use_low_rank_simhash: bool = False,
     simhash_rank: int = 1,
     use_srht: bool = False,
+    use_cross_polytope: bool = False,
 ) -> RepParams:
     """Precompute projection parameters for one repetition.
 
-    Exactly one SimHash variant is built when ``num_simhash_projections > 0``:
-
-    * ``use_srht=True``: SRHT params (d_signs, sample_indices, padded_dim)
-    * ``use_low_rank_simhash=True``: low-rank factors (A, B)
-    * otherwise: full-rank Gaussian matrix W
+    Priority order (when multiple flags could be set):
+        CROSS_POLYTOPE > SRHT > LOW_RANK_GAUSSIAN > DEFAULT_IDENTITY
 
     Parameters
     ----------
-    rep_seed:
-        Per-repetition seed (``config.seed + rep``).
-    dimension:
-        Input embedding dimension.
-    projection_dim:
-        Width of each partition slot after optional Count Sketch.
-    num_simhash_projections:
-        Number of SimHash bits *k*; 0 disables all SimHash.
-    use_identity:
-        When ``True``, Count Sketch fields are left as ``None``.
-    use_low_rank_simhash:
-        When ``True``, build LOW_RANK_GAUSSIAN factors instead of full matrix.
-    simhash_rank:
-        Rank *r* for LOW_RANK_GAUSSIAN.  Ignored otherwise.
-    use_srht:
-        When ``True``, build SRHT params instead of full matrix.
-        Takes precedence over ``use_low_rank_simhash`` if both are set.
-
-    Returns
-    -------
-    RepParams
+    rep_seed             : per-repetition seed (config.seed + rep)
+    dimension            : input embedding dimension
+    projection_dim       : slot width after optional Count Sketch
+    num_simhash_projections : k; 0 disables SimHash (ignored for CROSS_POLYTOPE)
+    use_identity         : True -> skip Count Sketch
+    use_low_rank_simhash : True -> LOW_RANK_GAUSSIAN factors
+    simhash_rank         : r for LOW_RANK_GAUSSIAN
+    use_srht             : True -> SRHT params
+    use_cross_polytope   : True -> Cross-Polytope params
     """
     cs_indices = cs_signs = None
     if not use_identity:
@@ -121,8 +83,13 @@ def build_rep_params(
     simhash_a = simhash_b = None
     srht_d_signs = srht_sample_indices = None
     srht_padded_dim = None
+    cp_d_signs = None
+    cp_padded_dim = None
 
-    if num_simhash_projections > 0:
+    if use_cross_polytope:
+        # Cross-Polytope: full rotation, no subsampling, num_simhash_projections ignored
+        cp_d_signs, cp_padded_dim = cross_polytope_params(rep_seed, projection_dim)
+    elif num_simhash_projections > 0:
         if use_srht:
             srht_d_signs, srht_sample_indices, srht_padded_dim = srht_params(
                 rep_seed, projection_dim, num_simhash_projections
@@ -143,4 +110,6 @@ def build_rep_params(
         srht_d_signs=srht_d_signs,
         srht_sample_indices=srht_sample_indices,
         srht_padded_dim=srht_padded_dim,
+        cp_d_signs=cp_d_signs,
+        cp_padded_dim=cp_padded_dim,
     )

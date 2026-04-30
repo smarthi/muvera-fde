@@ -19,68 +19,39 @@ class ProjectionType(enum.Enum):
     ``AMS_SKETCH`` is a misnomer inherited from the Google graph-mining C++ source.
     The actual construction is a **Count Sketch** (Charikar, Chen & Farach-Colton, 2002),
     not an AMS sketch (Alon-Matias-Szegedy, 1996).
-
-    AMS sketch is a streaming frequency-moment estimator; Count Sketch is a sparse
-    dimensionality-reduction map::
-
-        for each input dimension i:
-            hash to one output bucket: j  ~ Uniform{0, ..., projection_dim - 1}
-            draw a random sign:        s  ~ Uniform{-1, +1}
-            y[j] += s * x[i]
-
-    Each input dimension touches exactly one output bucket (O(d) time), and the
-    +-1 signs ensure E[<sketch(x), sketch(y)>] = <x, y>.  Both Count Sketch and
-    the dense +-1/sqrt(d) projection in the MUVERA paper satisfy a Johnson-Lindenstrauss
-    guarantee; they are distinct constructions.
     """
 
     DEFAULT_IDENTITY = 0
-    """No projection; raw embeddings are used directly.
+    """Full-rank Gaussian SimHash (baseline).
 
-    Full-rank Gaussian SimHash matrix W in R^{d x k} is sampled once per
-    repetition.  Partition assignment uses sign(projected @ W).
-
-    Cost: O(N x d x k) per repetition.
+    Samples W ~ N(0,1)^{d x k} per repetition.
+    Partition cost: O(N x d x k).
     Quality: full-rank Gaussian baseline.
     Constraint: none.
     """
 
     AMS_SKETCH = 1
-    """Sparse Count Sketch projection on token embeddings before SimHash.
+    """Count Sketch token projection + full-rank Gaussian SimHash.
 
-    Reduces per-partition slot width from d to projection_dimension via a
-    sparse +-1 random map before applying full-rank Gaussian SimHash.  Used
-    when FDE output size is the primary concern.
-
-    Cost (token projection): O(N x d) -- one non-zero per input dimension.
-    Cost (SimHash): O(N x projection_dimension x k).
-    Quality: unbiased dot-product estimator; JL guarantee inherited.
+    Reduces per-partition slot width from d to projection_dimension before
+    SimHash via a sparse +-1 random map.
+    Partition cost: O(N x projection_dimension x k).
+    Quality: unbiased dot-product estimator; JL guarantee.
     Constraint: projection_dimension required.
-
-    See class docstring for the Count Sketch vs AMS Sketch naming note.
     """
 
     LOW_RANK_GAUSSIAN = 2
-    """Low-rank Gaussian SimHash: W ~ AB^T, A in R^{d x r}, B in R^{k x r}.
+    """Low-rank factored SimHash: W ~ AB^T where A in R^{d x r}, B in R^{k x r}.
 
-    Replaces the full (d x k) SimHash matrix with two smaller Gaussian factors,
-    cutting the per-repetition SimHash cost from O(N x d x k) to
-    O(N x d x r + N x r x k) via two smaller matmuls::
+    Two smaller matmuls instead of one large one::
 
-        sketch = (projected @ A) @ B.T   # shape: (N, k)
+        sketch = (projected @ A) @ B.T   # O(N x d x r + N x r x k)
 
-    The 1/sqrt(r) normalisation is omitted: sign assignments are scale-invariant
-    (sign(alpha*x) = sign(x) for any alpha > 0), so it has no effect.
+    Convergence guarantee (EGGROLL, Sarkar et al. 2025, Theorem 4):
+    O(r^-1) convergence to full-rank -- faster than CLT rate O(r^{-1/2})
+    because symmetry cancels odd cumulants in the Edgeworth expansion.
 
-    Convergence guarantee (EGGROLL, Sarkar et al. 2025, Theorem 4): the
-    low-rank sign pattern converges to the full-rank Gaussian sign pattern at
-    O(r^-1) -- faster than the standard CLT rate O(r^{-1/2}) -- because
-    symmetry cancels all odd cumulants in the Edgeworth expansion.
-
-    Practical targets for ColQwen2 (d=128, k=8):
-
-    * r = 4  ->  ~25% variance increase, 544N vs 1024N ops (~1.9x faster)
-    * r = 8  ->  ~12% variance increase, 1088N vs 1024N ops (~breakeven)
+    Practical targets (d=128, k=8): r=4 -> ~1.9x faster, ~25% variance increase.
 
     Cost: O(N x d x r + N x r x k).
     Quality: O(r^-1) convergence to full-rank.
@@ -88,46 +59,52 @@ class ProjectionType(enum.Enum):
     """
 
     SRHT = 3
-    """Subsampled Randomized Hadamard Transform (SRHT) for SimHash.
+    """Subsampled Randomized Hadamard Transform SimHash.
 
-    Replaces the dense Gaussian SimHash matrix with a structured transform:
+    Structured transform S H D x (sign flip, WHT, subsample) at O(d log d),
+    independent of k.  Full JL guarantee, no rank approximation error.
 
-        S H D x
+    References: Woolfe, Liberty, Rokhlin & Tygert, 2008; Ailon & Chazelle, 2006;
+    improved analysis: Tropp, 2011 arXiv:1011.1595.
 
-    where:
+    Cost: O(N x d x log d) -- independent of k.
+    Quality: full JL, no rank error.
+    Constraint: k <= next_power_of_2(d).
+    """
 
-    * D: random diagonal +-1 (Rademacher) matrix -- element-wise sign flip
-    * H: Walsh-Hadamard transform -- O(d log d) butterfly operations
-    * S: random row subsampling -- selects k of the d transformed dimensions
+    CROSS_POLYTOPE = 4
+    """Cross-Polytope LSH using structured SRHT rotation + argmax.
 
-    The input is zero-padded to the next power of 2 >= d before applying H,
-    so the transform is valid for any embedding dimension.
+    Applies a full SRHT rotation (D then H on the padded embedding), then
+    assigns each token to the partition determined by its dominant coordinate::
 
-    The 1/sqrt(k) normalisation is omitted for the same reason as LOW_RANK_GAUSSIAN:
-    SimHash sign assignments are scale-invariant.
+        y = H D x_padded                  # full SRHT rotation
+        j = argmax_i |y_i|                # dominant coordinate index
+        s = int(y_j > 0)                  # sign of dominant coordinate
+        partition = 2*j + s               # in [0, 2 * padded_dim)
 
-    Theoretical guarantees (Woolfe, Liberty, Rokhlin & Tygert, 2008;
-    building on Ailon & Chazelle, 2006 Fast Johnson-Lindenstrauss Transform):
+    This is theoretically optimal for cosine similarity -- Cross-Polytope LSH
+    partitions align with the Voronoi cells of the cross-polytope rather than
+    random hyperplanes, giving provably better partition efficiency in high
+    dimensions (Andoni & Razenshteyn, 2015).
 
-    * JL guarantee: pairwise distances preserved to eps with high probability
-    * Cost: O(d log d) per token -- sub-quadratic in d
-    * No approximation vs full-rank Gaussian when k <= d (exact JL)
+    Key difference from SRHT: SRHT uses sign(S H D x) across k subsampled
+    dimensions.  CROSS_POLYTOPE uses argmax(|H D x|) across ALL padded_dim
+    dimensions, producing 2*padded_dim partitions per repetition.
 
-    Cost comparison for ColQwen2 (d=128, k=8, log2(128)=7):
+    num_simhash_projections is IGNORED for CROSS_POLYTOPE.
+    num_partitions = 2 * next_power_of_2(dimension).
 
-    * DEFAULT_IDENTITY: O(N x 128 x 8) = 1024N ops
-    * LOW_RANK_GAUSSIAN r=4: O(N x 128 x 4 + N x 4 x 8) = 544N ops
-    * SRHT: O(N x 128 x 7 + N x 8) = 904N ops
+    For ColQwen2 (d=128):  padded_dim=128,  num_partitions=256.
+    For ColQwen3.5 (d=320): padded_dim=512,  num_partitions=1024.
 
-    SRHT has stronger theoretical guarantees than LOW_RANK_GAUSSIAN (no rank
-    approximation error -- it IS a full JL projection, just structured) but
-    is slower than LOW_RANK_GAUSSIAN for small r.  Choose SRHT when you need
-    full JL quality with sub-quadratic cost; choose LOW_RANK_GAUSSIAN when
-    speed dominates and mild approximation error is acceptable.
+    Because partitions are plentiful, fill_empty_partitions is recommended.
+    CROSS_POLYTOPE always uses densifying fill (O(num_empty), hash-based)
+    rather than Hamming NN fill, since no sketch matrix is produced.
 
-    Cost: O(N x d x log(d)) -- independent of k.
-    Quality: full JL guarantee, no rank approximation.
-    Constraint: num_simhash_projections must satisfy k <= next_power_of_2(d).
+    Cost: O(N x d x log d) -- same as SRHT.
+    Quality: theoretically optimal cosine-similarity partition efficiency.
+    Constraint: dimension must be >= 1; num_simhash_projections is ignored.
     """
 
 
@@ -137,42 +114,39 @@ class FDEConfig(BaseModel):
     Parameters
     ----------
     dimension:
-        Dimension of each input token embedding (e.g. 128 for ColBERT/ColQwen2).
+        Dimension of each input token embedding.
+        ColQwen2=128, ColQwen3.5 v3=320.
     num_repetitions:
-        Independent repetitions; more -> larger FDE output, better approximation.
+        Independent repetitions; more -> larger FDE, better approximation.
     num_simhash_projections:
-        Number of SimHash bits *k*; partitions = 2 ** k.  Paper default: 4 -> 16 partitions.
+        SimHash bits *k*; partitions = 2^k.  Ignored for CROSS_POLYTOPE.
     seed:
-        Shared RNG seed -- **must match** between query and document encoders.
+        Shared RNG seed -- must match between query and document encoders.
     projection_type:
-        ``DEFAULT_IDENTITY``, ``AMS_SKETCH``, ``LOW_RANK_GAUSSIAN``, or ``SRHT``.
-        See :class:`ProjectionType` for full documentation of each.
+        DEFAULT_IDENTITY, AMS_SKETCH, LOW_RANK_GAUSSIAN, SRHT, or CROSS_POLYTOPE.
     projection_dimension:
-        Target dimension after Count Sketch projection.  Required (and must be
-        positive) when *projection_type* is ``AMS_SKETCH``; ignored otherwise.
+        Target dimension after Count Sketch.  Required for AMS_SKETCH.
     simhash_rank:
-        Rank *r* of the low-rank SimHash factorisation.  Only used when
-        *projection_type* is ``LOW_RANK_GAUSSIAN``.  Must satisfy
-        ``1 <= simhash_rank < num_simhash_projections``.  r=4 is a practical
-        sweet spot for ColQwen2 (d=128) with ``num_simhash_projections`` >= 8.
-        Ignored for all other projection types.
+        Rank *r* for LOW_RANK_GAUSSIAN.  Must satisfy 1 <= r < k.
     fill_empty_partitions:
-        Document-side only.  When ``True``, partition slots with no assigned
-        tokens are filled with the projection of the nearest token by SimHash
-        Hamming distance.  Must be ``False`` for query-side encoding.
+        Document-side only.  Fill empty partition slots.  Must be False for queries.
+    densifying_fill:
+        When True (and fill_empty_partitions=True), use O(num_empty) hash-based
+        Densifying LSH fill (Shrivastava, 2014) instead of the default O(N*k)
+        Hamming nearest-neighbour fill.  Automatically forced True for CROSS_POLYTOPE
+        since no sketch matrix is available for Hamming distances.
+        Densifying fill is faster but less geometrically precise than Hamming fill.
     final_projection_dimension:
-        If set, the full intermediate FDE is compressed to this size via
-        Count Sketch after all repetitions are accumulated.  Reduces memory and
-        index storage at the cost of approximation quality.
+        Post-accumulation Count Sketch compression to this size.
 
     Notes
     -----
-    The output FDE dimension (before final compression) is::
+    Output FDE dimension (before final compression)::
 
-        num_repetitions x 2**num_simhash_projections x projection_dim
+        num_repetitions x num_partitions x projection_dim
 
-    where *projection_dim* is ``dimension`` for DEFAULT_IDENTITY / LOW_RANK_GAUSSIAN /
-    SRHT, or ``projection_dimension`` for AMS_SKETCH.
+    where num_partitions = 2^k for DEFAULT_IDENTITY / AMS_SKETCH / LOW_RANK_GAUSSIAN /
+    SRHT, or 2*next_power_of_2(dimension) for CROSS_POLYTOPE.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -185,4 +159,5 @@ class FDEConfig(BaseModel):
     projection_dimension: int | None = None
     simhash_rank: int = 1
     fill_empty_partitions: bool = False
+    densifying_fill: bool = False
     final_projection_dimension: int | None = None

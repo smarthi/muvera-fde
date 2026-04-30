@@ -1,6 +1,6 @@
 # pymuvera — MUVERA + EGGROLL: Fixed Dimensional Encodings for Multi-Vector Retrieval
 
-**Sub-linear ANN retrieval for ColBERT, ColPali, and ColQwen2.**
+**Sub-linear ANN retrieval for ColBERT, ColPali, ColQwen2, and ColQwen3.5.**
 
 [![PyPI](https://img.shields.io/pypi/v/pymuvera)](https://pypi.org/project/pymuvera/)
 [![Python](https://img.shields.io/pypi/pyversions/pymuvera)](https://pypi.org/project/pymuvera/)
@@ -8,34 +8,46 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A pure-Python port of Google's graph-mining MUVERA implementation, extended with
-**low-rank SimHash factorisation** (EGGROLL, Sarkar et al., 2025) and
-**Subsampled Randomized Hadamard Transform** (SRHT, Woolfe, Liberty, Rokhlin & Tygert, 2008) SimHash modes.
+**low-rank SimHash factorisation** (EGGROLL, Sarkar et al., 2025),
+**Subsampled Randomized Hadamard Transform** (SRHT, Woolfe, Liberty, Rokhlin & Tygert, 2008),
+**Cross-Polytope LSH** (Andoni & Razenshteyn, 2015), and
+**Densifying LSH fill** (Shrivastava, 2014).
 
-|                                       | Reference                                                                                     |
-|---------------------------------------|-----------------------------------------------------------------------------------------------|
-| MUVERA paper                          | [Dhulipala et al., 2024](https://arxiv.org/abs/2405.19504)                                    |
-| EGGROLL paper                         | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf)                          |
-| Johnson-Lindenstrauss Transform paper | [Ailon et al., 2006](https://www.cs.princeton.edu/~chazelle/pubs/FJLT-sicomp09.pdf)           |
-| Original C++ implementation           | [google/graph-mining](https://github.com/google/graph-mining/tree/main/sketching/point_cloud) |
+| | Reference |
+|---|---|
+| MUVERA paper | [Dhulipala et al., 2024](https://arxiv.org/abs/2405.19504) |
+| EGGROLL paper (LOW_RANK_GAUSSIAN) | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf) |
+| SRHT | [Woolfe, Liberty, Rokhlin & Tygert, 2008](https://doi.org/10.1016/j.acha.2007.12.002) |
+| Cross-Polytope LSH | [Andoni & Razenshteyn, 2015](https://arxiv.org/abs/1509.02897) |
+| Densifying LSH | [Shrivastava, 2014](https://arxiv.org/abs/1401.4605) |
+| Original C++ implementation | [google/graph-mining](https://github.com/google/graph-mining/tree/main/sketching/point_cloud) |
 
 ---
 
 ## What this library adds beyond the original paper
 
-The MUVERA paper uses a full-rank Gaussian matrix for SimHash partitioning. This
-library adds two new SimHash projection modes, each with distinct cost/quality tradeoffs:
+The MUVERA paper uses a full-rank Gaussian matrix for SimHash partitioning and
+Hamming nearest-neighbour fill for empty partitions. This library adds four new
+capabilities:
 
-**`LOW_RANK_GAUSSIAN`** factors the SimHash matrix as AB⊤ (where `A ∈ ℝ^{d×r}`,
-`B ∈ ℝ^{k×r}`, `r ≪ k`), cutting partition compute from `O(N·d·k)` to
-`O(N·d·r + N·r·k)`. The theoretical backing is EGGROLL (Sarkar et al., 2025,
-Theorem 4): O(r⁻¹) convergence to the full-rank Gaussian sign pattern. At `r=4`
-with ColQwen2 (d=128, k=8): **~1.9× faster**, ~25% variance increase.
+**`LOW_RANK_GAUSSIAN`** (EGGROLL, Sarkar et al., 2025) factors the SimHash matrix
+as AB⊤ (`A ∈ ℝ^{d×r}`, `B ∈ ℝ^{k×r}`, `r ≪ k`), cutting partition cost from
+`O(N·d·k)` to `O(N·d·r + N·r·k)`. O(r⁻¹) convergence to full-rank, faster than
+the CLT rate. At r=4, ColQwen2 (d=128, k=8): **~1.9× faster**, ~25% variance increase.
 
-**`SRHT`** (Subsampled Randomized Hadamard Transform, Woolfe, Liberty, Rokhlin & Tygert, 2008) applies
-a structured `S·H·D` transform — random sign flip, Walsh-Hadamard, random row
-subsample — at `O(N·d·log d)` cost, independent of k. It carries a **full JL
-guarantee** with zero rank-approximation error, making it the theoretically safest
-choice. For ColQwen2 (d=128, k=8): **904N ops vs 1024N** for full-rank.
+**`SRHT`** (Woolfe et al., 2008) applies a structured `S·H·D` transform at
+`O(N·d·log d)` cost, independent of k. **Full JL guarantee**, zero rank error.
+For ColQwen2 (d=128, k=8): 904N vs 1024N ops.
+
+**`CROSS_POLYTOPE`** (Andoni & Razenshteyn, 2015) uses `argmax(|H·D·x|)` instead
+of sign-based SimHash, producing 2·padded_dim partitions per repetition aligned with
+the Voronoi cells of the cross-polytope — **theoretically optimal for cosine
+similarity** in high dimensions. For ColQwen2 (d=128): 256 partitions at O(d log d)
+cost. For ColQwen3.5 (d=320): 1024 partitions.
+
+**Densifying LSH fill** (Shrivastava, 2014) replaces O(N·k) Hamming nearest-neighbour
+fill with a deterministic O(num_empty) hash-based fill. No sketch matrix needed —
+automatically used for `CROSS_POLYTOPE`, opt-in for other modes via `densifying_fill=True`.
 
 ---
 
@@ -108,7 +120,7 @@ score = float(q_fde @ d_fde)
 
 ### `MUVERAEncoder`
 
-The primary entry point. Initialize **once** and reuse for all queries and
+The primary entry point. Initialise **once** and reuse for all queries and
 documents — the random partition structure (SimHash matrices, Count Sketch
 parameters) must be identical on both sides.
 
@@ -132,10 +144,11 @@ MUVERAEncoder(
 | `num_simhash_projections` | 4 | SimHash bits *k*; partitions = 2^k |
 | `num_repetitions` | 1 | Independent repetitions (more → better approximation) |
 | `seed` | 1 | Shared RNG seed — **must match** query and document sides |
-| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY`, `AMS_SKETCH` (Count Sketch on token embeddings), `LOW_RANK_GAUSSIAN` (low-rank factored SimHash, EGGROLL), or `SRHT` (Subsampled Randomized Hadamard Transform) |
+| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY`, `AMS_SKETCH`, `LOW_RANK_GAUSSIAN` (EGGROLL), `SRHT`, or `CROSS_POLYTOPE` (argmax-based, theoretically optimal cosine partitioning) |
 | `projection_dimension` | `None` | Target dim after Count Sketch; required for `AMS_SKETCH` |
 | `simhash_rank` | 1 | Rank *r* for `LOW_RANK_GAUSSIAN`; must satisfy `1 ≤ r < num_simhash_projections`. r=4 is a practical sweet spot for ColQwen2 (d=128, k≥8) |
-| `fill_empty_partitions` | `False` | Document side: fill empty slots via Hamming-nearest-neighbour |
+| `fill_empty_partitions` | `False` | Document side: fill empty slots |
+| `densifying_fill` | `False` | Use O(num_empty) Densifying LSH fill (Shrivastava, 2014) instead of O(N×k) Hamming NN fill. Automatically forced True for `CROSS_POLYTOPE` |
 | `final_projection_dimension` | `None` | Post-accumulation Count Sketch compression |
 
 **Property:** `fde_dimension` — output vector length.
@@ -318,23 +331,135 @@ sign assignments are scale-invariant so the embedding constants do not apply dir
 
 ---
 
-#### Three-way comparison for ColQwen2 (d=128)
+---
 
-| Mode | SimHash cost (k=8) | vs baseline | Quality | Extra constraint |
+#### Mode 4: `CROSS_POLYTOPE` — theoretically optimal cosine partitioning
+
+Applies a full SRHT rotation (no subsampling), then assigns each token to its
+**dominant coordinate** — the coordinate with the largest absolute value after rotation:
+
+```python
+y = H D x_padded                    # full Walsh-Hadamard rotation
+j = argmax_i |y_i|                  # dominant coordinate
+s = int(y_j > 0)                    # sign of dominant coordinate
+partition = 2*j + s                 # in [0, 2 * padded_dim)
+```
+
+```python
+from muvera_fde import ProjectionType
+
+enc = MUVERAEncoder(
+    dimension=128,
+    num_repetitions=4,
+    projection_type=ProjectionType.CROSS_POLYTOPE,
+    fill_empty_partitions=True,   # densifying fill used automatically
+    seed=42,
+)
+# num_partitions = 2 * next_power_of_2(128) = 256  (NOT 2^k)
+# fde_dimension  = 4 × 256 × 128 = 131,072
+# num_simhash_projections is IGNORED for CROSS_POLYTOPE
+```
+
+**Why Cross-Polytope is theoretically superior to SimHash:** SimHash partitions space
+with random hyperplanes — each bit is independent. Cross-Polytope partitions by
+finding the Voronoi cell of the cross-polytope that contains the rotated vector. For
+cosine similarity, Cross-Polytope cells are provably more collision-efficient: two
+nearly-identical vectors are more likely to share the same dominant coordinate than
+to agree on all k sign bits (Andoni & Razenshteyn, 2015).
+
+| Model | `dimension` | `padded_dim` | `num_partitions` per rep |
+|---|---|---|---|
+| ColQwen2 | 128 | 128 | 256 |
+| ColQwen3.5 v3 | 320 | 512 | 1,024 |
+
+> Because `num_partitions` grows with `dimension`, enable `fill_empty_partitions=True`
+> for any document corpus — densifying fill is used automatically.
+
+---
+
+#### Densifying LSH fill — O(num_empty) fill for all projection types
+
+By default, `fill_empty_partitions=True` uses **Hamming nearest-neighbour fill**:
+for each empty slot, find the token with the smallest Hamming distance in the SimHash
+sign space. This is geometrically accurate but costs O(num_tokens × k × num_empty).
+
+**Densifying LSH fill** (Shrivastava, 2014) replaces this with a deterministic hash:
+
+```
+for each empty slot p:
+    token_idx = splitmix64(p ⊕ seed) % num_tokens
+    rep_slice[p] = projected[token_idx]
+```
+
+Cost: **O(num_empty)** — independent of num_tokens and k.
+
+```python
+# Explicit opt-in for sign-based modes
+enc = MUVERAEncoder(
+    dimension=128,
+    num_simhash_projections=10,   # 1024 partitions — many will be empty
+    num_repetitions=4,
+    fill_empty_partitions=True,
+    densifying_fill=True,          # O(num_empty) instead of O(N*k)
+)
+
+# Automatic for CROSS_POLYTOPE (no sketch matrix available for Hamming)
+enc = MUVERAEncoder(
+    dimension=320,
+    num_repetitions=8,
+    projection_type=ProjectionType.CROSS_POLYTOPE,
+    fill_empty_partitions=True,    # densifying fill is forced automatically
+    final_projection_dimension=81920,
+)
+```
+
+| Fill strategy | Cost | Quality | When to use |
+|---|---|---|---|
+| Hamming NN (default) | O(N × k × empty) | Most geometrically precise | k ≤ 8, moderate corpus size |
+| Densifying LSH | O(num_empty) | Less precise, guaranteed fill | k ≥ 10, large corpus, CROSS_POLYTOPE |
+
+---
+
+#### SimHash projection modes — five-way comparison (ColQwen2, d=128)
+
+| Mode | SimHash cost (d=128) | vs baseline | Quality | Extra constraint |
 |---|---|---|---|---|
-| `DEFAULT_IDENTITY` | 1024N ops | 1× | Full-rank Gaussian baseline | None |
-| `LOW_RANK_GAUSSIAN` r=4 | 544N ops | **1.9×** | O(r⁻¹) convergence, ~25% variance ↑ | `1 ≤ r < k` |
-| `LOW_RANK_GAUSSIAN` r=1 | 136N ops | **7.5×** | ~100% variance baseline | `1 ≤ r < k` |
-| `SRHT` | 904N ops | 1.1× | Full JL, no rank error | `k ≤ next_pow2(d)` |
+| `DEFAULT_IDENTITY` | 1024N ops (k=8) | 1× | Full-rank Gaussian baseline | None |
+| `LOW_RANK_GAUSSIAN` r=4 | 544N ops (k=8) | **1.9×** | O(r⁻¹) convergence, ~25% variance ↑ | `1 ≤ r < k` |
+| `LOW_RANK_GAUSSIAN` r=1 | 136N ops (k=8) | **7.5×** | ~100% variance baseline | `1 ≤ r < k` |
+| `SRHT` | 904N ops (k=8) | 1.1× | Full JL, no rank error | `k ≤ next_pow2(d)` |
+| `CROSS_POLYTOPE` | 896N ops (all partitions) | 1.1× | Theoretically optimal cosine | `fill` recommended |
+
+#### Empty-slot fill strategies — comparison
+
+When `fill_empty_partitions=True`, two fill strategies are available:
+
+| Strategy | Cost | Precision | When to use |
+|---|---|---|---|
+| **Hamming NN** (default) | O(N × k × num_empty) | High — nearest token by SimHash distance | k ≤ 10, small–medium corpora |
+| **Densifying LSH** (`densifying_fill=True`) | O(num_empty) | Lower — deterministic hash, no geometry | k ≥ 10, large corpora, `CROSS_POLYTOPE` (automatic) |
+
+Densifying LSH fill (Shrivastava, 2014) assigns each empty slot a source token
+deterministically via a splitmix64 hash of the partition index — no distance
+computation, no sketch matrix required. It is **automatically used for
+`CROSS_POLYTOPE`** (no sketch matrix exists for Hamming distances) and opt-in
+for all other modes via `densifying_fill=True`.
 
 **When to use each:**
 
 * **`DEFAULT_IDENTITY`** — default choice; correctness baseline, no constraints.
 * **`LOW_RANK_GAUSSIAN`** — when speed is the priority and mild quality loss is acceptable.
-  Use r=4 for ColQwen2. Becomes more attractive as k grows (cost scales as O(r) not O(k)).
-* **`SRHT`** — when you need full JL quality at sub-quadratic cost, or when k is large
-  (SRHT cost is O(d log d) regardless of k). Preferred for precision-critical workloads
-  like legal/tax document retrieval where recall matters.
+  **Requires k ≥ 16 and r/k ≤ 0.25** to make the tradeoff meaningful. r=4, k=6 (r/k=0.67)
+  is nearly full-rank — all the variance penalty, almost no speed gain. Avoid.
+* **`SRHT`** — full JL quality at sub-quadratic cost. Preferred for precision-critical
+  workloads like legal/tax document retrieval where recall matters.
+* **`CROSS_POLYTOPE`** — when you want theoretically optimal cosine similarity
+  partitioning without tuning k. Best for high-d models (ColQwen3.5 d=320) where
+  num_partitions = 2×512 = 1024 gives fine-grained coverage. Always pair with
+  `fill_empty_partitions=True` (densifying fill is automatic).
+* **Densifying LSH fill** — when fill cost is a bottleneck (large k, large corpus),
+  or whenever using `CROSS_POLYTOPE`. Enable with `densifying_fill=True` on any
+  projection type. Trades geometric precision for O(num_empty) speed.
 
 ---
 
@@ -571,7 +696,7 @@ enc = MUVERAEncoder(
 # use final_projection_dimension if index size is a constraint
 ```
 
-#### ColQwen3.5 v3 — speed-optimized (SRHT)
+#### ColQwen3.5 v3 — speed-optimised (SRHT)
 
 ```python
 enc = MUVERAEncoder(
@@ -584,6 +709,41 @@ enc = MUVERAEncoder(
 )
 # Full JL guarantee, ~12% faster SimHash than DEFAULT_IDENTITY at k=8
 # Best quality/speed tradeoff in benchmarks
+```
+
+#### ColQwen3.5 v3 — Cross-Polytope (theoretically optimal)
+
+```python
+enc = MUVERAEncoder(
+    dimension=320,
+    num_repetitions=4,
+    projection_type=ProjectionType.CROSS_POLYTOPE,
+    fill_empty_partitions=True,    # densifying fill automatic
+    seed=42,
+    final_projection_dimension=81920,
+)
+# num_partitions = 2 * 512 = 1024 per repetition
+# raw fde = 4 * 1024 * 320 = 1,310,720 -> compressed to 81,920
+```
+
+---
+
+#### ColQwen3.5 v3 — Cross-Polytope (theoretically optimal cosine partitioning)
+
+```python
+from muvera_fde import ProjectionType
+
+enc = MUVERAEncoder(
+    dimension=320,
+    num_repetitions=8,
+    projection_type=ProjectionType.CROSS_POLYTOPE,
+    fill_empty_partitions=True,    # densifying fill used automatically — O(num_empty)
+    final_projection_dimension=81920,
+    seed=42,
+)
+# num_partitions = 2 * 512 = 1024 per repetition (next_power_of_2(320)=512)
+# fde_dimension before compression = 8 × 1024 × 320 = 2,621,440
+# Recommended for high-quality retrieval on complex document pages (tables, charts)
 ```
 
 #### ColQwen3.5 v3 — low-rank (correctly configured)
@@ -682,6 +842,10 @@ licensed under Apache 2.0.
 Low-rank SimHash extension inspired by
 [EGGROLL: Evolution Strategies at the Hyperscale](https://eshyperscale.github.io/imgs/paper.pdf)
 (Sarkar et al., 2025).
+
+Cross-Polytope LSH: Andoni & Razenshteyn, 2015 — *Optimal Data-Dependent Hashing for Approximate Near Neighbors*.
+
+Densifying LSH: Shrivastava, 2014 — *Asymmetric LSH (ALSH) for Sublinear Time Maximum Inner Product Search*.
 
 See [NOTICE](NOTICE) for the full upstream attribution.
 
