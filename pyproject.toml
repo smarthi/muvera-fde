@@ -72,7 +72,7 @@ Changelog      = "https://github.com/smarthi/muvera-fde/blob/main/CHANGELOG.md"
 # Hatchling build config
 # ---------------------------------------------------------------------------
 [tool.hatch.build.targets.wheel]
-packages = ["src/muvera_fde"]
+packages = ["src/pymuvera"]
 
 [tool.hatch.build.targets.sdist]
 include = [
