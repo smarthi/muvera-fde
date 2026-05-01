@@ -1,6 +1,6 @@
 # pymuvera — MUVERA + EGGROLL: Fixed Dimensional Encodings for Multi-Vector Retrieval
 
-**Sub-linear ANN retrieval for ColBERT, ColPali, ColQwen2, and ColQwen3.5.**
+**Sublinear ANN retrieval for ColBERT, ColPali, ColQwen2, and ColQwen3.5.**
 
 [![PyPI](https://img.shields.io/pypi/v/pymuvera)](https://pypi.org/project/pymuvera/)
 [![Python](https://img.shields.io/pypi/pyversions/pymuvera)](https://pypi.org/project/pymuvera/)
@@ -27,7 +27,7 @@ A pure-Python port of Google's graph-mining MUVERA implementation, extended with
 ## What this library adds beyond the original paper
 
 The MUVERA paper uses a full-rank Gaussian matrix for SimHash partitioning and
-Hamming nearest-neighbour fill for empty partitions. This library adds four new
+Hamming nearest-neighbor fill for empty partitions. This library adds four new
 capabilities:
 
 **`LOW_RANK_GAUSSIAN`** (EGGROLL, Sarkar et al., 2025) factors the SimHash matrix
@@ -45,7 +45,7 @@ the Voronoi cells of the cross-polytope — **theoretically optimal for cosine
 similarity** in high dimensions. For ColQwen2 (d=128): 256 partitions at O(d log d)
 cost. For ColQwen3.5 (d=320): 1024 partitions.
 
-**Densifying LSH fill** (Shrivastava, 2014) replaces O(N·k) Hamming nearest-neighbour
+**Densifying LSH fill** (Shrivastava, 2014) replaces O(N·k) Hamming nearest-neighbor
 fill with a deterministic O(num_empty) hash-based fill. No sketch matrix needed —
 automatically used for `CROSS_POLYTOPE`, opt-in for other modes via `densifying_fill=True`.
 
@@ -72,7 +72,7 @@ fde_query(Q) · fde_doc(D)  ≈  Chamfer(Q, D)
 ```
 
 Standard ANN libraries (FAISS, ScaNN, OpenSearch k-NN) can then index FDE
-vectors directly, restoring sub-linear retrieval for late-interaction models.
+vectors directly, restoring sublinear retrieval for late-interaction models.
 
 ---
 
@@ -120,7 +120,7 @@ score = float(q_fde @ d_fde)
 
 ### `MUVERAEncoder`
 
-The primary entry point. Initialise **once** and reuse for all queries and
+The primary entry point. Initialize **once** and reuse for all queries and
 documents — the random partition structure (SimHash matrices, Count Sketch
 parameters) must be identical on both sides.
 
@@ -379,7 +379,7 @@ to agree on all k sign bits (Andoni & Razenshteyn, 2015).
 
 #### Densifying LSH fill — O(num_empty) fill for all projection types
 
-By default, `fill_empty_partitions=True` uses **Hamming nearest-neighbour fill**:
+By default, `fill_empty_partitions=True` uses **Hamming nearest-neighbor fill**:
 for each empty slot, find the token with the smallest Hamming distance in the SimHash
 sign space. This is geometrically accurate but costs O(num_tokens × k × num_empty).
 
@@ -696,7 +696,7 @@ enc = MUVERAEncoder(
 # use final_projection_dimension if index size is a constraint
 ```
 
-#### ColQwen3.5 v3 — speed-optimised (SRHT)
+#### ColQwen3.5 v3 — speed-optimized (SRHT)
 
 ```python
 enc = MUVERAEncoder(
@@ -842,6 +842,8 @@ licensed under Apache 2.0.
 Low-rank SimHash extension inspired by
 [EGGROLL: Evolution Strategies at the Hyperscale](https://eshyperscale.github.io/imgs/paper.pdf)
 (Sarkar et al., 2025).
+
+Subsampled Randomized Hadamard Transform, (SRHT, Woolfe, Liberty, Rokhlin & Tygert, 2008)
 
 Cross-Polytope LSH: Andoni & Razenshteyn, 2015 — *Optimal Data-Dependent Hashing for Approximate Near Neighbors*.
 

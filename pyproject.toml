@@ -62,11 +62,11 @@ docs = [
 ]
 
 [project.urls]
-Homepage       = "https://github.com/smarthi/muvera-fde"
-Documentation  = "https://muvera-fde.readthedocs.io"
-Repository     = "https://github.com/smarthi/muvera-fde"
-"Bug Tracker"  = "https://github.com/smarthi/muvera-fde/issues"
-Changelog      = "https://github.com/smarthi/muvera-fde/blob/main/CHANGELOG.md"
+Homepage       = "https://github.com/smarthi/pymuvera"
+Documentation  = "https://pymuvera.readthedocs.io"
+Repository     = "https://github.com/smarthi/pymuvera"
+"Bug Tracker"  = "https://github.com/smarthi/pymuvera/issues"
+Changelog      = "https://github.com/smarthi/pymuvera/blob/main/CHANGELOG.md"
 
 # ---------------------------------------------------------------------------
 # Hatchling build config
